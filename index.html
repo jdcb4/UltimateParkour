@@ -53,9 +53,48 @@
         }
 
         .jump-btn { background: rgba(255, 69, 0, 0.4); border-color: #ff4500; font-weight: bold; }
-        .duck-btn { background: rgba(30, 144, 255, 0.4); border-color: #1e90ff; font-weight: bold; }
+        .duck-btn { background: rgba(30, 144, 255, 0.4); border-color: #1e90ff; font-weight: bold; position: relative; }
 
         .control-btn:active { transform: scale(0.9); background: rgba(0, 0, 0, 0.3); }
+
+        /* Duck meter styling - shows remaining duck time */
+        #duck-meter-container {
+            position: absolute;
+            bottom: 100px;
+            right: 30px;
+            width: 85px;
+            height: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 5px;
+            overflow: hidden;
+            z-index: 25;
+            display: none;
+        }
+
+        #duck-meter {
+            height: 100%;
+            width: 100%;
+            background: linear-gradient(90deg, #1e90ff, #00bfff);
+            border-radius: 5px;
+            transition: width 0.05s linear;
+        }
+
+        #duck-meter.depleted {
+            background: linear-gradient(90deg, #ff4444, #cc0000);
+        }
+
+        /* Duck cooldown indicator on the button */
+        .duck-btn .cooldown-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 0%;
+            background: rgba(255, 0, 0, 0.4);
+            border-radius: 0 0 16px 16px;
+            transition: height 0.05s linear;
+            pointer-events: none;
+        }
 
         #menu {
             position: absolute;
@@ -68,6 +107,7 @@
             border: 6px solid #ff4500;
             pointer-events: auto;
             min-width: 320px;
+            max-width: 400px;
             z-index: 100;
             box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
         }
@@ -83,6 +123,39 @@
             box-shadow: 0 6px 0 #b33000;
             margin-top: 15px;
             text-transform: uppercase;
+            font-weight: bold;
+        }
+
+        /* Score summary styling for game over screen */
+        .score-summary {
+            background: #f3f4f6;
+            border-radius: 15px;
+            padding: 15px;
+            margin: 15px 0;
+            text-align: left;
+        }
+
+        .score-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .score-item:last-child {
+            border-bottom: none;
+        }
+
+        .score-item .label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: bold;
+        }
+
+        .score-item .count {
+            font-size: 1.2em;
             font-weight: bold;
         }
     </style>
@@ -101,6 +174,11 @@
     </div>
 </div>
 
+<!-- Duck meter shows remaining duck time -->
+<div id="duck-meter-container">
+    <div id="duck-meter"></div>
+</div>
+
 <div id="controls-ui" style="display: none;">
     <div class="steering-group">
         <div class="flex gap-4">
@@ -111,7 +189,10 @@
     
     <div class="action-group">
         <div class="control-btn jump-btn" id="btn-jump">JUMP</div>
-        <div class="control-btn duck-btn" id="btn-duck">DUCK</div>
+        <div class="control-btn duck-btn" id="btn-duck">
+            DUCK
+            <div class="cooldown-overlay" id="duck-cooldown"></div>
+        </div>
     </div>
 </div>
 
@@ -124,20 +205,36 @@
         <p class="flex items-center">🚧 Jump <span class="text-orange-600 font-bold ml-1">RED GAPS</span></p>
         <p class="flex items-center">🔩 Duck <span class="text-blue-600 font-bold ml-1">BLUE PIPES</span></p>
         <p class="flex items-center">📦 Dodge <span class="text-yellow-600 font-bold ml-1">AC UNITS</span></p>
+        <p class="flex items-center">⏱️ Duck has a time limit - watch the meter!</p>
     </div>
 
     <button class="start-btn" onclick="startGame()">START RUN</button>
 </div>
 
 <script>
+    // ===== GAME VARIABLES =====
     let scene, camera, renderer, clock;
     let score = 0, highScore = 0, gameActive = false;
     let obstacles = [];
     let buildings = [];
     let clouds = [];
+    let skylineBuildings = []; // Background city skyline buildings
     const trackWidth = 15;
     const baseForwardSpeed = 0.28;
     
+    // Track how many of each obstacle type was successfully passed
+    let obstacleStats = {
+        gaps: 0,      // small_gap and full_gap combined
+        pipes: 0,     // vent_pipe
+        acUnits: 0    // ac_unit
+    };
+
+    // Duck time limit settings (in seconds)
+    const MAX_DUCK_TIME = 1.5;  // Maximum seconds you can duck continuously
+    let currentDuckTime = MAX_DUCK_TIME;  // Current remaining duck time
+    let isDuckDepleted = false;  // True when duck time has run out
+    
+    // Player state and physics
     const player = {
         x: 0,
         y: 1.6,
@@ -154,15 +251,20 @@
         bobSpeed: 0.15
     };
 
+    // Keyboard/touch input state
     const keys = { left: false, right: false, space: false, duck: false };
 
+    // ===== INITIALIZATION =====
     function init() {
+        // Create the Three.js scene
         scene = new THREE.Scene();
         scene.background = new THREE.Color(0x87CEEB); // Sky Blue
-        scene.fog = new THREE.Fog(0x87CEEB, 20, 180);
+        scene.fog = new THREE.Fog(0x87CEEB, 20, 250); // Extended fog distance for skyline
 
+        // Set up the camera (first-person view)
         camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         
+        // Create the renderer
         renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setPixelRatio(window.devicePixelRatio);
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -174,19 +276,23 @@
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
         scene.add(ambientLight);
 
+        // Sun light casting shadows
         const sunLight = new THREE.DirectionalLight(0xffffff, 0.6);
         sunLight.position.set(50, 100, 20);
         scene.add(sunLight);
 
-        // Clouds
-        for(let i=0; i<15; i++) {
+        // Create fluffy clouds in the sky
+        for(let i = 0; i < 15; i++) {
             const cloud = createCloud();
-            cloud.position.set((Math.random()-0.5)*200, 30 + Math.random()*20, -Math.random()*500);
+            cloud.position.set((Math.random() - 0.5) * 200, 30 + Math.random() * 20, -Math.random() * 500);
             scene.add(cloud);
             clouds.push(cloud);
         }
 
-        // Listeners
+        // Create the city skyline (background buildings)
+        createCitySkyline();
+
+        // Set up keyboard controls
         window.addEventListener('keydown', (e) => {
             if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
             if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
@@ -200,6 +306,7 @@
             if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.duck = false;
         });
 
+        // Link touch/mouse buttons to controls
         const linkBtn = (id, key) => {
             const el = document.getElementById(id);
             el.addEventListener('touchstart', (e) => { e.preventDefault(); keys[key] = true; });
@@ -216,28 +323,230 @@
         resetWorld();
     }
 
+    // ===== CITY SKYLINE CREATION =====
+    // Creates a beautiful background cityscape with varied skyscrapers
+    function createCitySkyline() {
+        // Clear existing skyline buildings
+        skylineBuildings.forEach(b => scene.remove(b));
+        skylineBuildings = [];
+
+        // Building colors for variety (glass, concrete, modern)
+        const buildingColors = [
+            0x4a5568, // Dark gray
+            0x718096, // Medium gray
+            0x2d3748, // Charcoal
+            0x1a365d, // Dark blue
+            0x2c5282, // Navy
+            0x553c9a, // Purple
+            0x744210, // Brown
+            0x276749, // Dark green
+        ];
+
+        // Window colors (some lit, some reflective)
+        const windowColors = [
+            0x87CEEB, // Sky reflection
+            0xffeaa7, // Warm lit
+            0x74b9ff, // Blue tint
+            0xdfe6e9, // White
+        ];
+
+        // Create buildings on both sides of the track
+        const sides = [-1, 1]; // Left and right side
+        
+        sides.forEach(side => {
+            // Create multiple rows of buildings for depth
+            for (let row = 0; row < 3; row++) {
+                const baseDistance = 25 + row * 30; // Distance from track
+                
+                // Create buildings along the length of the track
+                for (let i = 0; i < 25; i++) {
+                    const building = createSkylineBuilding(
+                        side * (baseDistance + Math.random() * 15),
+                        -i * 80 - Math.random() * 40,
+                        buildingColors,
+                        windowColors,
+                        row
+                    );
+                    scene.add(building);
+                    skylineBuildings.push(building);
+                }
+            }
+        });
+    }
+
+    // Creates a single skyscraper building for the skyline
+    function createSkylineBuilding(x, z, colors, windowColors, row) {
+        const group = new THREE.Group();
+        
+        // Random building dimensions - taller buildings in back rows
+        const baseHeight = 40 + Math.random() * 60 + row * 30;
+        const width = 8 + Math.random() * 12;
+        const depth = 8 + Math.random() * 12;
+        
+        // Main building body
+        const buildingColor = colors[Math.floor(Math.random() * colors.length)];
+        const buildingMat = new THREE.MeshPhongMaterial({ 
+            color: buildingColor,
+            shininess: 30
+        });
+        
+        // Some buildings have multiple sections (stepped design)
+        const sections = Math.random() > 0.6 ? Math.floor(Math.random() * 3) + 1 : 1;
+        let currentHeight = 0;
+        
+        for (let s = 0; s < sections; s++) {
+            const sectionHeight = baseHeight / sections;
+            const sectionWidth = width * (1 - s * 0.15);
+            const sectionDepth = depth * (1 - s * 0.15);
+            
+            const sectionGeo = new THREE.BoxGeometry(sectionWidth, sectionHeight, sectionDepth);
+            const section = new THREE.Mesh(sectionGeo, buildingMat);
+            section.position.y = -100 + currentHeight + sectionHeight / 2;
+            group.add(section);
+            
+            // Add windows to this section
+            addWindowsToSection(section, sectionWidth, sectionHeight, sectionDepth, windowColors);
+            
+            currentHeight += sectionHeight;
+        }
+        
+        // Add rooftop details (antenna, water tower, etc.)
+        if (Math.random() > 0.5) {
+            addRooftopDetails(group, currentHeight - 100, width, depth);
+        }
+        
+        group.position.set(x, 0, z);
+        return group;
+    }
+
+    // Adds windows to a building section
+    function addWindowsToSection(section, width, height, depth, windowColors) {
+        const windowColor = windowColors[Math.floor(Math.random() * windowColors.length)];
+        const windowMat = new THREE.MeshBasicMaterial({ color: windowColor });
+        
+        // Window grid parameters
+        const windowWidth = 0.6;
+        const windowHeight = 1.0;
+        const windowSpacingX = 2;
+        const windowSpacingY = 2.5;
+        
+        const windowsX = Math.floor((width - 2) / windowSpacingX);
+        const windowsY = Math.floor((height - 2) / windowSpacingY);
+        
+        // Front and back windows
+        for (let wx = 0; wx < windowsX; wx++) {
+            for (let wy = 0; wy < windowsY; wy++) {
+                // Randomly skip some windows for variety
+                if (Math.random() > 0.15) {
+                    const winGeo = new THREE.PlaneGeometry(windowWidth, windowHeight);
+                    
+                    // Front window
+                    const winFront = new THREE.Mesh(winGeo, windowMat);
+                    winFront.position.set(
+                        -width/2 + 1 + wx * windowSpacingX + windowSpacingX/2,
+                        -height/2 + 1 + wy * windowSpacingY + windowSpacingY/2,
+                        depth/2 + 0.1
+                    );
+                    section.add(winFront);
+                    
+                    // Back window
+                    const winBack = winFront.clone();
+                    winBack.position.z = -depth/2 - 0.1;
+                    winBack.rotation.y = Math.PI;
+                    section.add(winBack);
+                }
+            }
+        }
+    }
+
+    // Adds rooftop details like antennas and water towers
+    function addRooftopDetails(group, topY, width, depth) {
+        const detailMat = new THREE.MeshPhongMaterial({ color: 0x444444 });
+        
+        // Antenna
+        if (Math.random() > 0.5) {
+            const antennaHeight = 5 + Math.random() * 10;
+            const antenna = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.2, 0.3, antennaHeight, 6),
+                detailMat
+            );
+            antenna.position.set(0, topY + antennaHeight/2, 0);
+            group.add(antenna);
+            
+            // Antenna light (red warning light)
+            const lightGeo = new THREE.SphereGeometry(0.4, 8, 8);
+            const lightMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+            const light = new THREE.Mesh(lightGeo, lightMat);
+            light.position.set(0, topY + antennaHeight, 0);
+            group.add(light);
+        }
+        
+        // Water tower
+        if (Math.random() > 0.7) {
+            const towerGroup = new THREE.Group();
+            
+            // Tower legs
+            const legMat = new THREE.MeshPhongMaterial({ color: 0x555555 });
+            for (let i = 0; i < 4; i++) {
+                const leg = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.2, 0.2, 4, 6),
+                    legMat
+                );
+                const angle = (i / 4) * Math.PI * 2;
+                leg.position.set(Math.cos(angle) * 1.5, 2, Math.sin(angle) * 1.5);
+                towerGroup.add(leg);
+            }
+            
+            // Tank
+            const tank = new THREE.Mesh(
+                new THREE.CylinderGeometry(2, 2, 3, 12),
+                new THREE.MeshPhongMaterial({ color: 0x8B4513 })
+            );
+            tank.position.y = 5;
+            towerGroup.add(tank);
+            
+            // Roof
+            const roof = new THREE.Mesh(
+                new THREE.ConeGeometry(2.2, 1.5, 12),
+                new THREE.MeshPhongMaterial({ color: 0x333333 })
+            );
+            roof.position.y = 7.25;
+            towerGroup.add(roof);
+            
+            towerGroup.position.set(
+                (Math.random() - 0.5) * (width - 6),
+                topY,
+                (Math.random() - 0.5) * (depth - 6)
+            );
+            group.add(towerGroup);
+        }
+    }
+
+    // Creates a fluffy cloud
     function createCloud() {
         const group = new THREE.Group();
         const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-        for(let i=0; i<4; i++) {
-            const part = new THREE.Mesh(new THREE.SphereGeometry(3 + Math.random()*3, 8, 8), mat);
+        for(let i = 0; i < 4; i++) {
+            const part = new THREE.Mesh(new THREE.SphereGeometry(3 + Math.random() * 3, 8, 8), mat);
             part.position.x = i * 4;
-            part.position.y = (Math.random()-0.5) * 2;
+            part.position.y = (Math.random() - 0.5) * 2;
             group.add(part);
         }
         return group;
     }
 
+    // Handle window resize
     function onWindowResize() {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
+    // Creates the main rooftop platform the player runs on
     function createBuilding(z, length = 60) {
         const buildingGroup = new THREE.Group();
         
-        // Rooftop (Grey Concrete)
+        // Main rooftop surface (Grey Concrete)
         const roofHeight = 100;
         const roofGeo = new THREE.BoxGeometry(trackWidth, roofHeight, length);
         const roofMat = new THREE.MeshPhongMaterial({ color: 0xbdbdbd });
@@ -245,13 +554,24 @@
         roof.position.y = -roofHeight/2;
         buildingGroup.add(roof);
 
-        // Windows (Daytime Blue)
+        // Add rooftop texture details (gravel pattern)
+        const detailMat = new THREE.MeshPhongMaterial({ color: 0xa8a8a8 });
+        for (let i = 0; i < length / 20; i++) {
+            const detail = new THREE.Mesh(
+                new THREE.BoxGeometry(trackWidth - 1, 0.05, 0.3),
+                detailMat
+            );
+            detail.position.set(0, 0.03, -i * 20);
+            buildingGroup.add(detail);
+        }
+
+        // Windows on the building sides (Daytime Blue reflection)
         const windowGeo = new THREE.PlaneGeometry(0.8, 1.2);
         const windowMat = new THREE.MeshPhongMaterial({ color: 0x87CEEB, shininess: 100 });
-        for(let i=0; i<10; i++) {
-            for(let j=0; j<4; j++) {
+        for(let i = 0; i < 10; i++) {
+            for(let j = 0; j < 4; j++) {
                 const win = new THREE.Mesh(windowGeo, windowMat);
-                win.position.set((j-1.5)*3, -5 - i*5, length/2 + 0.1);
+                win.position.set((j - 1.5) * 3, -5 - i * 5, length/2 + 0.1);
                 buildingGroup.add(win);
                 
                 const winBack = win.clone();
@@ -261,7 +581,7 @@
             }
         }
 
-        // Parapet / Edges
+        // Parapet / Edge rails
         const edgeMat = new THREE.MeshPhongMaterial({ color: 0x999999 });
         const sideRailL = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, length), edgeMat);
         sideRailL.position.set(-trackWidth/2, 0.5, 0);
@@ -275,10 +595,12 @@
         buildings.push({ group: buildingGroup, zStart: z, zEnd: z - length });
     }
 
+    // Creates obstacles (gaps, pipes, AC units)
     function createObstacle(z) {
         const rand = Math.random();
         let type = 'ac_unit';
         
+        // After score of 100, introduce gaps and pipes
         if (z < -100) {
             if (rand > 0.8) type = 'full_gap';
             else if (rand > 0.6) type = 'small_gap';
@@ -289,46 +611,124 @@
         let col = { type, z, scored: false };
 
         if (type === 'small_gap' || type === 'full_gap') {
+            // Gap in the rooftop - must jump over
             const isFull = type === 'full_gap';
             const width = isFull ? trackWidth : 7;
             const x = isFull ? 0 : (Math.random() - 0.5) * (trackWidth - 7);
             
-            // Visual Gap
+            // Visual gap (dark void)
             mesh = new THREE.Mesh(
                 new THREE.BoxGeometry(width, 0.2, 5),
-                new THREE.MeshBasicMaterial({ color: 0x333333, transparent: true, opacity: 0.8 })
+                new THREE.MeshBasicMaterial({ color: 0x1a1a2e, transparent: true, opacity: 0.9 })
             );
             mesh.position.set(x, 0.01, z);
             
-            // Bright Safety Stripes
-            const stripe = new THREE.Mesh(new THREE.BoxGeometry(width, 0.15, 0.4), new THREE.MeshBasicMaterial({color: 0xff0000}));
-            stripe.position.z = 2.4;
+            // Add depth to the gap (shows building side)
+            const gapDepth = new THREE.Mesh(
+                new THREE.BoxGeometry(width - 0.5, 20, 4.5),
+                new THREE.MeshPhongMaterial({ color: 0x2d3748 })
+            );
+            gapDepth.position.y = -10;
+            mesh.add(gapDepth);
+            
+            // Bright red safety stripes (warning!)
+            const stripeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+            const stripe = new THREE.Mesh(new THREE.BoxGeometry(width, 0.15, 0.5), stripeMat);
+            stripe.position.z = 2.6;
+            stripe.position.y = 0.1;
             mesh.add(stripe);
             const stripe2 = stripe.clone();
-            stripe2.position.z = -2.4;
+            stripe2.position.z = -2.6;
             mesh.add(stripe2);
+            
+            // Yellow caution stripes on the sides
+            const cautionMat = new THREE.MeshBasicMaterial({ color: 0xffd700 });
+            const caution1 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.15, 5), cautionMat);
+            caution1.position.set(width/2 - 0.15, 0.1, 0);
+            mesh.add(caution1);
+            const caution2 = caution1.clone();
+            caution2.position.x = -width/2 + 0.15;
+            mesh.add(caution2);
 
             col.w = width; col.h = 0.1; col.x = x;
 
         } else if (type === 'vent_pipe') {
-            // Bright Blue Industrial Pipe
-            const geo = new THREE.CylinderGeometry(0.7, 0.7, trackWidth, 12);
-            const mat = new THREE.MeshPhongMaterial({ color: 0x1e90ff });
-            mesh = new THREE.Mesh(geo, mat);
-            mesh.rotation.z = Math.PI / 2;
-            mesh.position.set(0, 2.3, z);
+            // Blue industrial pipe - must duck under
+            const pipeGroup = new THREE.Group();
+            
+            // Main pipe
+            const pipeGeo = new THREE.CylinderGeometry(0.7, 0.7, trackWidth, 16);
+            const pipeMat = new THREE.MeshPhongMaterial({ color: 0x1e90ff, shininess: 80 });
+            const mainPipe = new THREE.Mesh(pipeGeo, pipeMat);
+            mainPipe.rotation.z = Math.PI / 2;
+            pipeGroup.add(mainPipe);
+            
+            // Pipe supports/brackets
+            const bracketMat = new THREE.MeshPhongMaterial({ color: 0x444444 });
+            const bracketGeo = new THREE.BoxGeometry(0.3, 2.3, 0.8);
+            const bracket1 = new THREE.Mesh(bracketGeo, bracketMat);
+            bracket1.position.set(-trackWidth/2 + 1, -1.15, 0);
+            pipeGroup.add(bracket1);
+            const bracket2 = bracket1.clone();
+            bracket2.position.x = trackWidth/2 - 1;
+            pipeGroup.add(bracket2);
+            
+            // Pipe flanges (connectors)
+            const flangeMat = new THREE.MeshPhongMaterial({ color: 0x0066cc });
+            const flangeGeo = new THREE.CylinderGeometry(0.9, 0.9, 0.3, 16);
+            const flange1 = new THREE.Mesh(flangeGeo, flangeMat);
+            flange1.rotation.z = Math.PI / 2;
+            flange1.position.x = -trackWidth/2 + 0.5;
+            pipeGroup.add(flange1);
+            const flange2 = flange1.clone();
+            flange2.position.x = trackWidth/2 - 0.5;
+            pipeGroup.add(flange2);
+            
+            pipeGroup.position.set(0, 2.3, z);
+            mesh = pipeGroup;
             
             col.w = trackWidth; col.h = 2.3; col.x = 0; col.minH = 1.4;
-        } else {
-            // Industrial Yellow AC Unit
-            mesh = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 4), new THREE.MeshPhongMaterial({color: 0xffd700}));
-            const pos = [-(trackWidth/4), 0, (trackWidth/4)][Math.floor(Math.random()*3)];
-            mesh.position.set(pos, 1.5, z);
             
-            // Ventilation Grille
-            const grill = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.1, 3.5), new THREE.MeshBasicMaterial({color: 0x222222}));
+        } else {
+            // AC Unit - must dodge around
+            const acGroup = new THREE.Group();
+            
+            // Main unit body
+            const bodyMat = new THREE.MeshPhongMaterial({ color: 0xffd700 });
+            const body = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 4), bodyMat);
+            acGroup.add(body);
+            
+            // Ventilation grille on top
+            const grillMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
+            const grill = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.1, 3.5), grillMat);
             grill.position.y = 1.51;
-            mesh.add(grill);
+            acGroup.add(grill);
+            
+            // Fan blades visible through grille
+            const fanMat = new THREE.MeshPhongMaterial({ color: 0x666666 });
+            for (let i = 0; i < 4; i++) {
+                const blade = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.05, 0.3), fanMat);
+                blade.rotation.y = (i / 4) * Math.PI * 2;
+                blade.position.y = 1.45;
+                acGroup.add(blade);
+            }
+            
+            // Side vents
+            const ventMat = new THREE.MeshBasicMaterial({ color: 0x333333 });
+            const ventGeo = new THREE.PlaneGeometry(3.5, 2);
+            const vent1 = new THREE.Mesh(ventGeo, ventMat);
+            vent1.position.set(0, 0, 2.01);
+            acGroup.add(vent1);
+            const vent2 = vent1.clone();
+            vent2.position.z = -2.01;
+            vent2.rotation.y = Math.PI;
+            acGroup.add(vent2);
+            
+            // Position on one of three lanes
+            const pos = [-(trackWidth/4), 0, (trackWidth/4)][Math.floor(Math.random() * 3)];
+            acGroup.position.set(pos, 1.5, z);
+            mesh = acGroup;
+            
             col.w = 4; col.h = 3; col.x = pos;
         }
 
@@ -337,145 +737,302 @@
         obstacles.push(col);
     }
 
+    // Resets the game world (obstacles and buildings)
     function resetWorld() {
+        // Remove existing obstacles and buildings
         obstacles.forEach(o => scene.remove(o.mesh));
         buildings.forEach(b => scene.remove(b.group));
         obstacles = [];
         buildings = [];
-        createBuilding(20, 10000); 
-        for(let i=1; i<=10; i++) createObstacle(-60 * i);
+        
+        // Create the main rooftop track
+        createBuilding(20, 10000);
+        
+        // Create initial obstacles
+        for(let i = 1; i <= 10; i++) {
+            createObstacle(-60 * i);
+        }
     }
 
+    // ===== GAME START =====
     function startGame() {
         document.getElementById('menu').style.display = 'none';
         document.getElementById('controls-ui').style.display = 'flex';
+        document.getElementById('duck-meter-container').style.display = 'block';
+        
         gameActive = true;
         score = 0;
+        
+        // Reset obstacle stats for the new run
+        obstacleStats = { gaps: 0, pipes: 0, acUnits: 0 };
+        
+        // Reset duck timer
+        currentDuckTime = MAX_DUCK_TIME;
+        isDuckDepleted = false;
+        updateDuckMeter();
+        
+        // Reset player state
         player.forwardSpeed = baseForwardSpeed;
         player.x = 0;
         player.y = player.baseHeight;
         player.isJumping = false;
         player.isDucking = false;
         camera.position.set(0, player.y, 0);
+        
+        // Update UI
         document.getElementById('score').innerText = score;
         document.getElementById('speedDisplay').innerText = "1.0";
+        
         resetWorld();
         animate();
     }
 
+    // ===== GAME OVER =====
     function gameOver(reason) {
         gameActive = false;
+        
+        // Update high score
         if (score > highScore) {
             highScore = score;
             document.getElementById('highScore').innerText = highScore;
         }
+        
+        // Hide game controls
         document.getElementById('controls-ui').style.display = 'none';
+        document.getElementById('duck-meter-container').style.display = 'none';
+        
+        // Show game over screen with detailed score summary
         document.getElementById('menu').style.display = 'block';
         document.getElementById('menu').innerHTML = `
             <h2 class="text-4xl font-bold mb-2 text-gray-800 italic">GAME OVER</h2>
             <p class="text-xl mb-4 text-red-600 font-bold uppercase">${reason}</p>
-            <p class="text-2xl mb-6 text-gray-700">SCORE: ${score}</p>
+            
+            <div class="score-summary">
+                <p class="text-lg font-bold text-gray-800 mb-3 text-center">📊 RUN SUMMARY</p>
+                
+                <div class="score-item">
+                    <span class="label">
+                        <span style="color: #ff4500;">🚧</span>
+                        <span style="color: #ff4500;">Gaps Jumped</span>
+                    </span>
+                    <span class="count" style="color: #ff4500;">${obstacleStats.gaps}</span>
+                </div>
+                
+                <div class="score-item">
+                    <span class="label">
+                        <span style="color: #1e90ff;">🔩</span>
+                        <span style="color: #1e90ff;">Pipes Ducked</span>
+                    </span>
+                    <span class="count" style="color: #1e90ff;">${obstacleStats.pipes}</span>
+                </div>
+                
+                <div class="score-item">
+                    <span class="label">
+                        <span style="color: #ffd700;">📦</span>
+                        <span style="color: #daa520;">AC Units Dodged</span>
+                    </span>
+                    <span class="count" style="color: #daa520;">${obstacleStats.acUnits}</span>
+                </div>
+                
+                <div class="score-item" style="border-top: 2px solid #333; margin-top: 10px; padding-top: 10px;">
+                    <span class="label">
+                        <span>🏆</span>
+                        <span class="text-gray-800">TOTAL SCORE</span>
+                    </span>
+                    <span class="count text-gray-800">${score}</span>
+                </div>
+            </div>
+            
             <button class="start-btn" onclick="startGame()">TRY AGAIN</button>
         `;
     }
 
+    // ===== DUCK METER UPDATE =====
+    // Updates the visual duck time indicator
+    function updateDuckMeter() {
+        const meter = document.getElementById('duck-meter');
+        const percentage = (currentDuckTime / MAX_DUCK_TIME) * 100;
+        meter.style.width = percentage + '%';
+        
+        // Change color when depleted
+        if (isDuckDepleted) {
+            meter.classList.add('depleted');
+        } else {
+            meter.classList.remove('depleted');
+        }
+        
+        // Update cooldown overlay on duck button
+        const cooldown = document.getElementById('duck-cooldown');
+        if (isDuckDepleted) {
+            cooldown.style.height = '100%';
+        } else {
+            cooldown.style.height = (100 - percentage) + '%';
+        }
+    }
+
+    // ===== MAIN GAME LOOP =====
     function animate() {
         if (!gameActive) return;
         requestAnimationFrame(animate);
 
-        // 1. Movement
+        // Get time delta for consistent timing
+        const delta = clock.getDelta();
+
+        // 1. Left/Right Movement
         if (keys.left) player.x -= player.moveSpeed;
         if (keys.right) player.x += player.moveSpeed;
+        
+        // Keep player within track bounds
         const limit = (trackWidth / 2) - 1.5;
         if (player.x < -limit) player.x = -limit;
         if (player.x > limit) player.x = limit;
 
-        // 2. Speed Scaling
+        // 2. Speed increases as score goes up
         let speedMultiplier = 1.0;
         if (score > 20) {
             const progress = Math.min(1.0, (score - 20) / 30);
-            speedMultiplier = 1.0 + progress; 
+            speedMultiplier = 1.0 + progress;
         }
         player.forwardSpeed = baseForwardSpeed * speedMultiplier;
         document.getElementById('speedDisplay').innerText = speedMultiplier.toFixed(1);
 
-        // 3. Jump/Duck
-        player.isDucking = keys.duck && !player.isJumping;
+        // 3. Duck Time Management
+        // Player can only duck if they have duck time remaining
+        const wantsToDuck = keys.duck && !player.isJumping;
         
+        if (wantsToDuck && !isDuckDepleted && currentDuckTime > 0) {
+            // Player is ducking - drain the duck timer
+            player.isDucking = true;
+            currentDuckTime -= delta;
+            
+            // Check if duck time has run out
+            if (currentDuckTime <= 0) {
+                currentDuckTime = 0;
+                isDuckDepleted = true;
+                player.isDucking = false;
+            }
+        } else {
+            // Not ducking - recharge the duck timer
+            player.isDucking = false;
+            
+            if (currentDuckTime < MAX_DUCK_TIME) {
+                // Recharge at 2x speed when not ducking
+                currentDuckTime += delta * 2;
+                
+                if (currentDuckTime >= MAX_DUCK_TIME) {
+                    currentDuckTime = MAX_DUCK_TIME;
+                    isDuckDepleted = false; // Reset depleted state when fully recharged
+                }
+            }
+            
+            // Also reset depleted state if player releases duck key
+            if (!keys.duck) {
+                isDuckDepleted = false;
+            }
+        }
+        
+        // Update the visual duck meter
+        updateDuckMeter();
+
+        // 4. Jump Physics
         if (keys.space && !player.isJumping && !player.isDucking) {
             player.yVelocity = player.jumpForce;
             player.isJumping = true;
         }
 
         if (player.isJumping) {
+            // Apply jump velocity and gravity
             player.y += player.yVelocity;
             player.yVelocity -= player.gravity;
+            
+            // Land when reaching ground level
             if (player.y <= player.baseHeight) {
                 player.y = player.baseHeight;
                 player.isJumping = false;
             }
         } else if (player.isDucking) {
+            // Lower camera when ducking
             player.y = player.duckHeight;
         } else {
+            // Normal running bob animation
             player.bobAmt += player.bobSpeed * speedMultiplier;
             player.y = player.baseHeight + Math.sin(player.bobAmt) * 0.04;
         }
 
+        // 5. Move camera forward
         camera.position.z -= player.forwardSpeed;
         camera.position.x = player.x;
         camera.position.y = player.y;
         
-        // Dynamic Tilt
+        // Add subtle camera tilt when moving sideways
         camera.rotation.z = (camera.position.x - player.x) * 0.4;
         camera.rotation.y = (camera.position.x - player.x) * 0.1;
 
-        // Move clouds slowly
+        // 6. Move clouds for parallax effect
         clouds.forEach(c => {
             c.position.z += 0.05;
-            if(c.position.z > camera.position.z + 50) c.position.z = camera.position.z - 450;
+            if(c.position.z > camera.position.z + 50) {
+                c.position.z = camera.position.z - 450;
+            }
         });
 
-        // 4. Collision
+        // 7. Collision Detection and Scoring
         obstacles.forEach((obs, index) => {
             const distZ = Math.abs(camera.position.z - obs.z);
             const distX = Math.abs(camera.position.x - obs.x);
 
+            // Check for collision (within 1.2 units of obstacle)
             if (distZ < 1.2) {
                 if (obs.type === 'small_gap' || obs.type === 'full_gap') {
+                    // Gap collision - must be jumping
                     if (!player.isJumping && distX < (obs.w / 2 + 0.3)) {
                         gameOver("WATCH THE GAP!");
                     }
                 } else if (obs.type === 'vent_pipe') {
+                    // Pipe collision - must be ducking (camera below 1.35)
                     if (camera.position.y > 1.35) {
                         gameOver("DUCK UNDER PIPES!");
                     }
                 } else if (distX < (obs.w / 2 + 0.2)) {
+                    // AC unit collision - must dodge
                     if (camera.position.y < (obs.h + 0.4)) {
                         gameOver("DODGE AC UNITS!");
                     }
                 }
             }
 
+            // Score when passing an obstacle
             if (obs.z > camera.position.z && !obs.scored) {
                 obs.scored = true;
                 score++;
                 document.getElementById('score').innerText = score;
+                
+                // Track which type of obstacle was beaten
+                if (obs.type === 'small_gap' || obs.type === 'full_gap') {
+                    obstacleStats.gaps++;
+                } else if (obs.type === 'vent_pipe') {
+                    obstacleStats.pipes++;
+                } else {
+                    obstacleStats.acUnits++;
+                }
             }
 
+            // Remove obstacles that are behind the player and spawn new ones
             if (obs.z > camera.position.z + 20) {
                 scene.remove(obs.mesh);
                 obstacles.splice(index, 1);
-                const lastZ = obstacles.length > 0 ? obstacles[obstacles.length-1].z : camera.position.z;
+                const lastZ = obstacles.length > 0 ? obstacles[obstacles.length - 1].z : camera.position.z;
                 createObstacle(lastZ - (55 + Math.random() * 25));
             }
         });
 
+        // Render the scene
         renderer.render(scene, camera);
     }
 
+    // Start initialization when page loads
     window.onload = init;
 </script>
 
 </body>
 </html>
-
