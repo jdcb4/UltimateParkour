@@ -57,7 +57,7 @@
 
         .control-btn:active { transform: scale(0.9); background: rgba(0, 0, 0, 0.3); }
 
-        /* Duck meter styling - shows remaining duck time */
+        /* Duck meter styling */
         #duck-meter-container {
             position: absolute;
             bottom: 100px;
@@ -83,7 +83,6 @@
             background: linear-gradient(90deg, #ff4444, #cc0000);
         }
 
-        /* Duck cooldown indicator on the button */
         .duck-btn .cooldown-overlay {
             position: absolute;
             bottom: 0;
@@ -126,7 +125,6 @@
             font-weight: bold;
         }
 
-        /* Score summary styling for game over screen */
         .score-summary {
             background: #f3f4f6;
             border-radius: 15px;
@@ -143,9 +141,7 @@
             border-bottom: 1px solid #e5e7eb;
         }
 
-        .score-item:last-child {
-            border-bottom: none;
-        }
+        .score-item:last-child { border-bottom: none; }
 
         .score-item .label {
             display: flex;
@@ -174,7 +170,6 @@
     </div>
 </div>
 
-<!-- Duck meter shows remaining duck time -->
 <div id="duck-meter-container">
     <div id="duck-meter"></div>
 </div>
@@ -218,23 +213,26 @@
     let obstacles = [];
     let buildings = [];
     let clouds = [];
-    let skylineBuildings = []; // Background city skyline buildings
     const trackWidth = 15;
     const baseForwardSpeed = 0.28;
     
-    // Track how many of each obstacle type was successfully passed
-    let obstacleStats = {
-        gaps: 0,      // small_gap and full_gap combined
-        pipes: 0,     // vent_pipe
-        acUnits: 0    // ac_unit
-    };
-
-    // Duck time limit settings (in seconds)
-    const MAX_DUCK_TIME = 1.5;  // Maximum seconds you can duck continuously
-    let currentDuckTime = MAX_DUCK_TIME;  // Current remaining duck time
-    let isDuckDepleted = false;  // True when duck time has run out
+    // ===== OPTIMIZED SKYLINE =====
+    // Pre-generated building textures (reused for performance)
+    let buildingTextures = [];
+    // Pool of skyline building sprites (recycled as player moves)
+    let skylineSprites = [];
+    const SKYLINE_POOL_SIZE = 24; // Only 24 sprites total, recycled
+    const SKYLINE_SPACING = 80;   // Distance between buildings
     
-    // Player state and physics
+    // Track obstacle stats for end-of-game summary
+    let obstacleStats = { gaps: 0, pipes: 0, acUnits: 0 };
+
+    // Duck time limit (seconds)
+    const MAX_DUCK_TIME = 1.5;
+    let currentDuckTime = MAX_DUCK_TIME;
+    let isDuckDepleted = false;
+    
+    // Player state
     const player = {
         x: 0,
         y: 1.6,
@@ -251,48 +249,46 @@
         bobSpeed: 0.15
     };
 
-    // Keyboard/touch input state
     const keys = { left: false, right: false, space: false, duck: false };
 
     // ===== INITIALIZATION =====
     function init() {
-        // Create the Three.js scene
         scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x87CEEB); // Sky Blue
-        scene.fog = new THREE.Fog(0x87CEEB, 20, 250); // Extended fog distance for skyline
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 40, 200);
 
-        // Set up the camera (first-person view)
-        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
         
-        // Create the renderer
-        renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer = new THREE.WebGLRenderer({ antialias: false }); // Disable antialiasing for performance
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap pixel ratio
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
 
         clock = new THREE.Clock();
 
-        // Daytime Lighting
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        // Simplified lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
         scene.add(ambientLight);
 
-        // Sun light casting shadows
-        const sunLight = new THREE.DirectionalLight(0xffffff, 0.6);
+        const sunLight = new THREE.DirectionalLight(0xffffff, 0.4);
         sunLight.position.set(50, 100, 20);
         scene.add(sunLight);
 
-        // Create fluffy clouds in the sky
-        for(let i = 0; i < 15; i++) {
+        // Create fewer clouds (8 instead of 15)
+        for(let i = 0; i < 8; i++) {
             const cloud = createCloud();
-            cloud.position.set((Math.random() - 0.5) * 200, 30 + Math.random() * 20, -Math.random() * 500);
+            cloud.position.set((Math.random() - 0.5) * 150, 25 + Math.random() * 15, -Math.random() * 400);
             scene.add(cloud);
             clouds.push(cloud);
         }
 
-        // Create the city skyline (background buildings)
-        createCitySkyline();
+        // Pre-generate building textures (done once at startup)
+        generateBuildingTextures();
+        
+        // Create the skyline sprite pool
+        createSkylinePool();
 
-        // Set up keyboard controls
+        // Keyboard controls
         window.addEventListener('keydown', (e) => {
             if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
             if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
@@ -306,7 +302,7 @@
             if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.duck = false;
         });
 
-        // Link touch/mouse buttons to controls
+        // Touch/mouse button controls
         const linkBtn = (id, key) => {
             const el = document.getElementById(id);
             el.addEventListener('touchstart', (e) => { e.preventDefault(); keys[key] = true; });
@@ -323,284 +319,186 @@
         resetWorld();
     }
 
-    // ===== CITY SKYLINE CREATION =====
-    // Creates a beautiful background cityscape with varied skyscrapers
-    function createCitySkyline() {
-        // Clear existing skyline buildings
-        skylineBuildings.forEach(b => scene.remove(b));
-        skylineBuildings = [];
-
-        // Building colors for variety (glass, concrete, modern)
-        const buildingColors = [
-            0x4a5568, // Dark gray
-            0x718096, // Medium gray
-            0x2d3748, // Charcoal
-            0x1a365d, // Dark blue
-            0x2c5282, // Navy
-            0x553c9a, // Purple
-            0x744210, // Brown
-            0x276749, // Dark green
-        ];
-
-        // Window colors (some lit, some reflective)
-        const windowColors = [
-            0x87CEEB, // Sky reflection
-            0xffeaa7, // Warm lit
-            0x74b9ff, // Blue tint
-            0xdfe6e9, // White
-        ];
-
-        // Create buildings on both sides of the track
-        const sides = [-1, 1]; // Left and right side
+    // ===== BUILDING TEXTURE GENERATION =====
+    // Creates building textures on 2D canvas (much faster than 3D geometry)
+    function generateBuildingTextures() {
+        const colors = ['#4a5568', '#718096', '#2d3748', '#1a365d', '#2c5282', '#553c9a'];
+        const windowColors = ['#87CEEB', '#ffeaa7', '#74b9ff', '#dfe6e9'];
         
-        sides.forEach(side => {
-            // Create multiple rows of buildings for depth
-            for (let row = 0; row < 3; row++) {
-                const baseDistance = 25 + row * 30; // Distance from track
+        // Generate 6 different building textures
+        for (let i = 0; i < 6; i++) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;  // Small texture size for performance
+            canvas.height = 128;
+            const ctx = canvas.getContext('2d');
+            
+            // Building body color
+            ctx.fillStyle = colors[i % colors.length];
+            ctx.fillRect(0, 0, 64, 128);
+            
+            // Add windows (drawn as rectangles on the texture)
+            const winColor = windowColors[Math.floor(Math.random() * windowColors.length)];
+            ctx.fillStyle = winColor;
+            
+            const windowWidth = 6;
+            const windowHeight = 8;
+            const cols = 4;
+            const rows = 10;
+            const spacingX = 14;
+            const spacingY = 12;
+            const offsetX = 5;
+            const offsetY = 4;
+            
+            for (let row = 0; row < rows; row++) {
+                for (let col = 0; col < cols; col++) {
+                    // Randomly skip some windows for variety
+                    if (Math.random() > 0.2) {
+                        ctx.fillRect(
+                            offsetX + col * spacingX,
+                            offsetY + row * spacingY,
+                            windowWidth,
+                            windowHeight
+                        );
+                    }
+                }
+            }
+            
+            // Add rooftop detail (antenna or water tower silhouette)
+            ctx.fillStyle = '#333333';
+            if (Math.random() > 0.5) {
+                // Antenna
+                ctx.fillRect(30, 0, 2, 8);
+                ctx.fillStyle = '#ff0000';
+                ctx.fillRect(29, 0, 4, 3);
+            }
+            
+            // Create Three.js texture from canvas
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.magFilter = THREE.NearestFilter; // Pixelated look, faster
+            buildingTextures.push(texture);
+        }
+    }
+
+    // ===== SKYLINE POOL =====
+    // Creates a pool of billboard sprites for the skyline (recycled for performance)
+    function createSkylinePool() {
+        // Clear existing sprites
+        skylineSprites.forEach(s => scene.remove(s.mesh));
+        skylineSprites = [];
+        
+        // Create sprites for left and right sides
+        for (let i = 0; i < SKYLINE_POOL_SIZE; i++) {
+            const side = i < SKYLINE_POOL_SIZE / 2 ? -1 : 1; // Left or right
+            const texture = buildingTextures[i % buildingTextures.length];
+            
+            // Random building height
+            const height = 40 + Math.random() * 60;
+            const width = height * 0.5;
+            
+            // Use SpriteMaterial for always-facing-camera billboards (very fast)
+            const material = new THREE.SpriteMaterial({ 
+                map: texture,
+                fog: true
+            });
+            const sprite = new THREE.Sprite(material);
+            sprite.scale.set(width, height, 1);
+            
+            // Position: offset to the side, below ground level, spread along z
+            const xOffset = 30 + Math.random() * 40;
+            sprite.position.set(
+                side * xOffset,
+                -height / 2 + 20, // Partially below ground
+                -i * SKYLINE_SPACING / 2
+            );
+            
+            scene.add(sprite);
+            skylineSprites.push({
+                mesh: sprite,
+                side: side,
+                height: height,
+                xOffset: xOffset
+            });
+        }
+    }
+
+    // Updates skyline positions (recycles sprites that go behind camera)
+    function updateSkyline() {
+        const recycleZ = camera.position.z + 50; // Behind camera threshold
+        const spawnZ = camera.position.z - 300;  // Far ahead spawn point
+        
+        skylineSprites.forEach(sprite => {
+            // If building is behind the player, recycle it to the front
+            if (sprite.mesh.position.z > recycleZ) {
+                sprite.mesh.position.z = spawnZ - Math.random() * 100;
                 
-                // Create buildings along the length of the track
-                for (let i = 0; i < 25; i++) {
-                    const building = createSkylineBuilding(
-                        side * (baseDistance + Math.random() * 15),
-                        -i * 80 - Math.random() * 40,
-                        buildingColors,
-                        windowColors,
-                        row
-                    );
-                    scene.add(building);
-                    skylineBuildings.push(building);
-                }
+                // Randomize appearance when recycled
+                sprite.xOffset = 30 + Math.random() * 40;
+                sprite.mesh.position.x = sprite.side * sprite.xOffset;
+                
+                // Random new height
+                const newHeight = 40 + Math.random() * 60;
+                sprite.mesh.scale.set(newHeight * 0.5, newHeight, 1);
+                sprite.mesh.position.y = -newHeight / 2 + 20;
+                
+                // Random texture
+                sprite.mesh.material.map = buildingTextures[Math.floor(Math.random() * buildingTextures.length)];
             }
         });
     }
 
-    // Creates a single skyscraper building for the skyline
-    function createSkylineBuilding(x, z, colors, windowColors, row) {
-        const group = new THREE.Group();
-        
-        // Random building dimensions - taller buildings in back rows
-        const baseHeight = 40 + Math.random() * 60 + row * 30;
-        const width = 8 + Math.random() * 12;
-        const depth = 8 + Math.random() * 12;
-        
-        // Main building body
-        const buildingColor = colors[Math.floor(Math.random() * colors.length)];
-        const buildingMat = new THREE.MeshPhongMaterial({ 
-            color: buildingColor,
-            shininess: 30
-        });
-        
-        // Some buildings have multiple sections (stepped design)
-        const sections = Math.random() > 0.6 ? Math.floor(Math.random() * 3) + 1 : 1;
-        let currentHeight = 0;
-        
-        for (let s = 0; s < sections; s++) {
-            const sectionHeight = baseHeight / sections;
-            const sectionWidth = width * (1 - s * 0.15);
-            const sectionDepth = depth * (1 - s * 0.15);
-            
-            const sectionGeo = new THREE.BoxGeometry(sectionWidth, sectionHeight, sectionDepth);
-            const section = new THREE.Mesh(sectionGeo, buildingMat);
-            section.position.y = -100 + currentHeight + sectionHeight / 2;
-            group.add(section);
-            
-            // Add windows to this section
-            addWindowsToSection(section, sectionWidth, sectionHeight, sectionDepth, windowColors);
-            
-            currentHeight += sectionHeight;
-        }
-        
-        // Add rooftop details (antenna, water tower, etc.)
-        if (Math.random() > 0.5) {
-            addRooftopDetails(group, currentHeight - 100, width, depth);
-        }
-        
-        group.position.set(x, 0, z);
-        return group;
-    }
-
-    // Adds windows to a building section
-    function addWindowsToSection(section, width, height, depth, windowColors) {
-        const windowColor = windowColors[Math.floor(Math.random() * windowColors.length)];
-        const windowMat = new THREE.MeshBasicMaterial({ color: windowColor });
-        
-        // Window grid parameters
-        const windowWidth = 0.6;
-        const windowHeight = 1.0;
-        const windowSpacingX = 2;
-        const windowSpacingY = 2.5;
-        
-        const windowsX = Math.floor((width - 2) / windowSpacingX);
-        const windowsY = Math.floor((height - 2) / windowSpacingY);
-        
-        // Front and back windows
-        for (let wx = 0; wx < windowsX; wx++) {
-            for (let wy = 0; wy < windowsY; wy++) {
-                // Randomly skip some windows for variety
-                if (Math.random() > 0.15) {
-                    const winGeo = new THREE.PlaneGeometry(windowWidth, windowHeight);
-                    
-                    // Front window
-                    const winFront = new THREE.Mesh(winGeo, windowMat);
-                    winFront.position.set(
-                        -width/2 + 1 + wx * windowSpacingX + windowSpacingX/2,
-                        -height/2 + 1 + wy * windowSpacingY + windowSpacingY/2,
-                        depth/2 + 0.1
-                    );
-                    section.add(winFront);
-                    
-                    // Back window
-                    const winBack = winFront.clone();
-                    winBack.position.z = -depth/2 - 0.1;
-                    winBack.rotation.y = Math.PI;
-                    section.add(winBack);
-                }
-            }
-        }
-    }
-
-    // Adds rooftop details like antennas and water towers
-    function addRooftopDetails(group, topY, width, depth) {
-        const detailMat = new THREE.MeshPhongMaterial({ color: 0x444444 });
-        
-        // Antenna
-        if (Math.random() > 0.5) {
-            const antennaHeight = 5 + Math.random() * 10;
-            const antenna = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.2, 0.3, antennaHeight, 6),
-                detailMat
-            );
-            antenna.position.set(0, topY + antennaHeight/2, 0);
-            group.add(antenna);
-            
-            // Antenna light (red warning light)
-            const lightGeo = new THREE.SphereGeometry(0.4, 8, 8);
-            const lightMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-            const light = new THREE.Mesh(lightGeo, lightMat);
-            light.position.set(0, topY + antennaHeight, 0);
-            group.add(light);
-        }
-        
-        // Water tower
-        if (Math.random() > 0.7) {
-            const towerGroup = new THREE.Group();
-            
-            // Tower legs
-            const legMat = new THREE.MeshPhongMaterial({ color: 0x555555 });
-            for (let i = 0; i < 4; i++) {
-                const leg = new THREE.Mesh(
-                    new THREE.CylinderGeometry(0.2, 0.2, 4, 6),
-                    legMat
-                );
-                const angle = (i / 4) * Math.PI * 2;
-                leg.position.set(Math.cos(angle) * 1.5, 2, Math.sin(angle) * 1.5);
-                towerGroup.add(leg);
-            }
-            
-            // Tank
-            const tank = new THREE.Mesh(
-                new THREE.CylinderGeometry(2, 2, 3, 12),
-                new THREE.MeshPhongMaterial({ color: 0x8B4513 })
-            );
-            tank.position.y = 5;
-            towerGroup.add(tank);
-            
-            // Roof
-            const roof = new THREE.Mesh(
-                new THREE.ConeGeometry(2.2, 1.5, 12),
-                new THREE.MeshPhongMaterial({ color: 0x333333 })
-            );
-            roof.position.y = 7.25;
-            towerGroup.add(roof);
-            
-            towerGroup.position.set(
-                (Math.random() - 0.5) * (width - 6),
-                topY,
-                (Math.random() - 0.5) * (depth - 6)
-            );
-            group.add(towerGroup);
-        }
-    }
-
-    // Creates a fluffy cloud
+    // ===== SIMPLE CLOUD CREATION =====
     function createCloud() {
         const group = new THREE.Group();
-        const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-        for(let i = 0; i < 4; i++) {
-            const part = new THREE.Mesh(new THREE.SphereGeometry(3 + Math.random() * 3, 8, 8), mat);
-            part.position.x = i * 4;
-            part.position.y = (Math.random() - 0.5) * 2;
+        // Use fewer, larger spheres (3 instead of 4)
+        const mat = new THREE.MeshBasicMaterial({ color: 0xffffff }); // BasicMaterial is faster
+        for(let i = 0; i < 3; i++) {
+            const part = new THREE.Mesh(
+                new THREE.SphereGeometry(4 + Math.random() * 2, 6, 6), // Lower poly count
+                mat
+            );
+            part.position.x = i * 5;
             group.add(part);
         }
         return group;
     }
 
-    // Handle window resize
     function onWindowResize() {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    // Creates the main rooftop platform the player runs on
+    // ===== MAIN TRACK BUILDING =====
     function createBuilding(z, length = 60) {
         const buildingGroup = new THREE.Group();
         
-        // Main rooftop surface (Grey Concrete)
+        // Main rooftop (single mesh)
         const roofHeight = 100;
         const roofGeo = new THREE.BoxGeometry(trackWidth, roofHeight, length);
         const roofMat = new THREE.MeshPhongMaterial({ color: 0xbdbdbd });
         const roof = new THREE.Mesh(roofGeo, roofMat);
-        roof.position.y = -roofHeight/2;
+        roof.position.y = -roofHeight / 2;
         buildingGroup.add(roof);
 
-        // Add rooftop texture details (gravel pattern)
-        const detailMat = new THREE.MeshPhongMaterial({ color: 0xa8a8a8 });
-        for (let i = 0; i < length / 20; i++) {
-            const detail = new THREE.Mesh(
-                new THREE.BoxGeometry(trackWidth - 1, 0.05, 0.3),
-                detailMat
-            );
-            detail.position.set(0, 0.03, -i * 20);
-            buildingGroup.add(detail);
-        }
-
-        // Windows on the building sides (Daytime Blue reflection)
-        const windowGeo = new THREE.PlaneGeometry(0.8, 1.2);
-        const windowMat = new THREE.MeshPhongMaterial({ color: 0x87CEEB, shininess: 100 });
-        for(let i = 0; i < 10; i++) {
-            for(let j = 0; j < 4; j++) {
-                const win = new THREE.Mesh(windowGeo, windowMat);
-                win.position.set((j - 1.5) * 3, -5 - i * 5, length/2 + 0.1);
-                buildingGroup.add(win);
-                
-                const winBack = win.clone();
-                winBack.position.z = -length/2 - 0.1;
-                winBack.rotation.y = Math.PI;
-                buildingGroup.add(winBack);
-            }
-        }
-
-        // Parapet / Edge rails
+        // Simplified edge rails (2 meshes only)
         const edgeMat = new THREE.MeshPhongMaterial({ color: 0x999999 });
         const sideRailL = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, length), edgeMat);
-        sideRailL.position.set(-trackWidth/2, 0.5, 0);
+        sideRailL.position.set(-trackWidth / 2, 0.5, 0);
         buildingGroup.add(sideRailL);
         const sideRailR = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, length), edgeMat);
-        sideRailR.position.set(trackWidth/2, 0.5, 0);
+        sideRailR.position.set(trackWidth / 2, 0.5, 0);
         buildingGroup.add(sideRailR);
 
-        buildingGroup.position.z = z - length/2;
+        buildingGroup.position.z = z - length / 2;
         scene.add(buildingGroup);
         buildings.push({ group: buildingGroup, zStart: z, zEnd: z - length });
     }
 
-    // Creates obstacles (gaps, pipes, AC units)
+    // ===== OBSTACLE CREATION (simplified geometry) =====
     function createObstacle(z) {
         const rand = Math.random();
         let type = 'ac_unit';
         
-        // After score of 100, introduce gaps and pipes
         if (z < -100) {
             if (rand > 0.8) type = 'full_gap';
             else if (rand > 0.6) type = 'small_gap';
@@ -611,124 +509,78 @@
         let col = { type, z, scored: false };
 
         if (type === 'small_gap' || type === 'full_gap') {
-            // Gap in the rooftop - must jump over
+            // Gap - simplified (just a dark box with red stripes)
             const isFull = type === 'full_gap';
             const width = isFull ? trackWidth : 7;
             const x = isFull ? 0 : (Math.random() - 0.5) * (trackWidth - 7);
             
-            // Visual gap (dark void)
-            mesh = new THREE.Mesh(
+            const gapGroup = new THREE.Group();
+            
+            // Dark void
+            const voidMesh = new THREE.Mesh(
                 new THREE.BoxGeometry(width, 0.2, 5),
-                new THREE.MeshBasicMaterial({ color: 0x1a1a2e, transparent: true, opacity: 0.9 })
+                new THREE.MeshBasicMaterial({ color: 0x1a1a2e })
             );
-            mesh.position.set(x, 0.01, z);
+            gapGroup.add(voidMesh);
             
-            // Add depth to the gap (shows building side)
-            const gapDepth = new THREE.Mesh(
-                new THREE.BoxGeometry(width - 0.5, 20, 4.5),
-                new THREE.MeshPhongMaterial({ color: 0x2d3748 })
-            );
-            gapDepth.position.y = -10;
-            mesh.add(gapDepth);
-            
-            // Bright red safety stripes (warning!)
+            // Red warning stripes (2 simple boxes)
             const stripeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-            const stripe = new THREE.Mesh(new THREE.BoxGeometry(width, 0.15, 0.5), stripeMat);
-            stripe.position.z = 2.6;
-            stripe.position.y = 0.1;
-            mesh.add(stripe);
-            const stripe2 = stripe.clone();
-            stripe2.position.z = -2.6;
-            mesh.add(stripe2);
+            const stripe1 = new THREE.Mesh(new THREE.BoxGeometry(width, 0.15, 0.4), stripeMat);
+            stripe1.position.set(0, 0.1, 2.4);
+            gapGroup.add(stripe1);
+            const stripe2 = new THREE.Mesh(new THREE.BoxGeometry(width, 0.15, 0.4), stripeMat);
+            stripe2.position.set(0, 0.1, -2.4);
+            gapGroup.add(stripe2);
             
-            // Yellow caution stripes on the sides
-            const cautionMat = new THREE.MeshBasicMaterial({ color: 0xffd700 });
-            const caution1 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.15, 5), cautionMat);
-            caution1.position.set(width/2 - 0.15, 0.1, 0);
-            mesh.add(caution1);
-            const caution2 = caution1.clone();
-            caution2.position.x = -width/2 + 0.15;
-            mesh.add(caution2);
-
+            gapGroup.position.set(x, 0.01, z);
+            mesh = gapGroup;
             col.w = width; col.h = 0.1; col.x = x;
 
         } else if (type === 'vent_pipe') {
-            // Blue industrial pipe - must duck under
+            // Blue pipe - simplified (single cylinder + 2 brackets)
             const pipeGroup = new THREE.Group();
             
-            // Main pipe
-            const pipeGeo = new THREE.CylinderGeometry(0.7, 0.7, trackWidth, 16);
-            const pipeMat = new THREE.MeshPhongMaterial({ color: 0x1e90ff, shininess: 80 });
-            const mainPipe = new THREE.Mesh(pipeGeo, pipeMat);
+            const mainPipe = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.7, 0.7, trackWidth, 8), // Lower poly
+                new THREE.MeshPhongMaterial({ color: 0x1e90ff })
+            );
             mainPipe.rotation.z = Math.PI / 2;
             pipeGroup.add(mainPipe);
             
-            // Pipe supports/brackets
-            const bracketMat = new THREE.MeshPhongMaterial({ color: 0x444444 });
-            const bracketGeo = new THREE.BoxGeometry(0.3, 2.3, 0.8);
-            const bracket1 = new THREE.Mesh(bracketGeo, bracketMat);
-            bracket1.position.set(-trackWidth/2 + 1, -1.15, 0);
+            // Simple brackets
+            const bracketMat = new THREE.MeshBasicMaterial({ color: 0x444444 });
+            const bracket1 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 2.3, 0.5), bracketMat);
+            bracket1.position.set(-trackWidth / 2 + 1, -1.15, 0);
             pipeGroup.add(bracket1);
-            const bracket2 = bracket1.clone();
-            bracket2.position.x = trackWidth/2 - 1;
+            const bracket2 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 2.3, 0.5), bracketMat);
+            bracket2.position.set(trackWidth / 2 - 1, -1.15, 0);
             pipeGroup.add(bracket2);
-            
-            // Pipe flanges (connectors)
-            const flangeMat = new THREE.MeshPhongMaterial({ color: 0x0066cc });
-            const flangeGeo = new THREE.CylinderGeometry(0.9, 0.9, 0.3, 16);
-            const flange1 = new THREE.Mesh(flangeGeo, flangeMat);
-            flange1.rotation.z = Math.PI / 2;
-            flange1.position.x = -trackWidth/2 + 0.5;
-            pipeGroup.add(flange1);
-            const flange2 = flange1.clone();
-            flange2.position.x = trackWidth/2 - 0.5;
-            pipeGroup.add(flange2);
             
             pipeGroup.position.set(0, 2.3, z);
             mesh = pipeGroup;
-            
             col.w = trackWidth; col.h = 2.3; col.x = 0; col.minH = 1.4;
             
         } else {
-            // AC Unit - must dodge around
+            // AC Unit - simplified (just main box + grille)
             const acGroup = new THREE.Group();
             
-            // Main unit body
-            const bodyMat = new THREE.MeshPhongMaterial({ color: 0xffd700 });
-            const body = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 4), bodyMat);
+            const body = new THREE.Mesh(
+                new THREE.BoxGeometry(4, 3, 4),
+                new THREE.MeshPhongMaterial({ color: 0xffd700 })
+            );
             acGroup.add(body);
             
-            // Ventilation grille on top
-            const grillMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
-            const grill = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.1, 3.5), grillMat);
+            // Simple top grille
+            const grill = new THREE.Mesh(
+                new THREE.BoxGeometry(3.5, 0.1, 3.5),
+                new THREE.MeshBasicMaterial({ color: 0x222222 })
+            );
             grill.position.y = 1.51;
             acGroup.add(grill);
             
-            // Fan blades visible through grille
-            const fanMat = new THREE.MeshPhongMaterial({ color: 0x666666 });
-            for (let i = 0; i < 4; i++) {
-                const blade = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.05, 0.3), fanMat);
-                blade.rotation.y = (i / 4) * Math.PI * 2;
-                blade.position.y = 1.45;
-                acGroup.add(blade);
-            }
-            
-            // Side vents
-            const ventMat = new THREE.MeshBasicMaterial({ color: 0x333333 });
-            const ventGeo = new THREE.PlaneGeometry(3.5, 2);
-            const vent1 = new THREE.Mesh(ventGeo, ventMat);
-            vent1.position.set(0, 0, 2.01);
-            acGroup.add(vent1);
-            const vent2 = vent1.clone();
-            vent2.position.z = -2.01;
-            vent2.rotation.y = Math.PI;
-            acGroup.add(vent2);
-            
-            // Position on one of three lanes
-            const pos = [-(trackWidth/4), 0, (trackWidth/4)][Math.floor(Math.random() * 3)];
+            const pos = [-(trackWidth / 4), 0, (trackWidth / 4)][Math.floor(Math.random() * 3)];
             acGroup.position.set(pos, 1.5, z);
             mesh = acGroup;
-            
             col.w = 4; col.h = 3; col.x = pos;
         }
 
@@ -737,21 +589,20 @@
         obstacles.push(col);
     }
 
-    // Resets the game world (obstacles and buildings)
     function resetWorld() {
-        // Remove existing obstacles and buildings
         obstacles.forEach(o => scene.remove(o.mesh));
         buildings.forEach(b => scene.remove(b.group));
         obstacles = [];
         buildings = [];
-        
-        // Create the main rooftop track
         createBuilding(20, 10000);
-        
-        // Create initial obstacles
         for(let i = 1; i <= 10; i++) {
             createObstacle(-60 * i);
         }
+        
+        // Reset skyline positions
+        skylineSprites.forEach((sprite, i) => {
+            sprite.mesh.position.z = -i * SKYLINE_SPACING / 2;
+        });
     }
 
     // ===== GAME START =====
@@ -762,16 +613,12 @@
         
         gameActive = true;
         score = 0;
-        
-        // Reset obstacle stats for the new run
         obstacleStats = { gaps: 0, pipes: 0, acUnits: 0 };
         
-        // Reset duck timer
         currentDuckTime = MAX_DUCK_TIME;
         isDuckDepleted = false;
         updateDuckMeter();
         
-        // Reset player state
         player.forwardSpeed = baseForwardSpeed;
         player.x = 0;
         player.y = player.baseHeight;
@@ -779,7 +626,6 @@
         player.isDucking = false;
         camera.position.set(0, player.y, 0);
         
-        // Update UI
         document.getElementById('score').innerText = score;
         document.getElementById('speedDisplay').innerText = "1.0";
         
@@ -791,17 +637,13 @@
     function gameOver(reason) {
         gameActive = false;
         
-        // Update high score
         if (score > highScore) {
             highScore = score;
             document.getElementById('highScore').innerText = highScore;
         }
         
-        // Hide game controls
         document.getElementById('controls-ui').style.display = 'none';
         document.getElementById('duck-meter-container').style.display = 'none';
-        
-        // Show game over screen with detailed score summary
         document.getElementById('menu').style.display = 'block';
         document.getElementById('menu').innerHTML = `
             <h2 class="text-4xl font-bold mb-2 text-gray-800 italic">GAME OVER</h2>
@@ -847,21 +689,18 @@
         `;
     }
 
-    // ===== DUCK METER UPDATE =====
-    // Updates the visual duck time indicator
+    // ===== DUCK METER =====
     function updateDuckMeter() {
         const meter = document.getElementById('duck-meter');
         const percentage = (currentDuckTime / MAX_DUCK_TIME) * 100;
         meter.style.width = percentage + '%';
         
-        // Change color when depleted
         if (isDuckDepleted) {
             meter.classList.add('depleted');
         } else {
             meter.classList.remove('depleted');
         }
         
-        // Update cooldown overlay on duck button
         const cooldown = document.getElementById('duck-cooldown');
         if (isDuckDepleted) {
             cooldown.style.height = '100%';
@@ -875,139 +714,109 @@
         if (!gameActive) return;
         requestAnimationFrame(animate);
 
-        // Get time delta for consistent timing
         const delta = clock.getDelta();
 
-        // 1. Left/Right Movement
+        // Movement
         if (keys.left) player.x -= player.moveSpeed;
         if (keys.right) player.x += player.moveSpeed;
-        
-        // Keep player within track bounds
         const limit = (trackWidth / 2) - 1.5;
-        if (player.x < -limit) player.x = -limit;
-        if (player.x > limit) player.x = limit;
+        player.x = Math.max(-limit, Math.min(limit, player.x));
 
-        // 2. Speed increases as score goes up
+        // Speed scaling
         let speedMultiplier = 1.0;
         if (score > 20) {
-            const progress = Math.min(1.0, (score - 20) / 30);
-            speedMultiplier = 1.0 + progress;
+            speedMultiplier = 1.0 + Math.min(1.0, (score - 20) / 30);
         }
         player.forwardSpeed = baseForwardSpeed * speedMultiplier;
         document.getElementById('speedDisplay').innerText = speedMultiplier.toFixed(1);
 
-        // 3. Duck Time Management
-        // Player can only duck if they have duck time remaining
+        // Duck management
         const wantsToDuck = keys.duck && !player.isJumping;
         
         if (wantsToDuck && !isDuckDepleted && currentDuckTime > 0) {
-            // Player is ducking - drain the duck timer
             player.isDucking = true;
             currentDuckTime -= delta;
-            
-            // Check if duck time has run out
             if (currentDuckTime <= 0) {
                 currentDuckTime = 0;
                 isDuckDepleted = true;
                 player.isDucking = false;
             }
         } else {
-            // Not ducking - recharge the duck timer
             player.isDucking = false;
-            
             if (currentDuckTime < MAX_DUCK_TIME) {
-                // Recharge at 2x speed when not ducking
                 currentDuckTime += delta * 2;
-                
                 if (currentDuckTime >= MAX_DUCK_TIME) {
                     currentDuckTime = MAX_DUCK_TIME;
-                    isDuckDepleted = false; // Reset depleted state when fully recharged
+                    isDuckDepleted = false;
                 }
             }
-            
-            // Also reset depleted state if player releases duck key
-            if (!keys.duck) {
-                isDuckDepleted = false;
-            }
+            if (!keys.duck) isDuckDepleted = false;
         }
-        
-        // Update the visual duck meter
         updateDuckMeter();
 
-        // 4. Jump Physics
+        // Jump
         if (keys.space && !player.isJumping && !player.isDucking) {
             player.yVelocity = player.jumpForce;
             player.isJumping = true;
         }
 
         if (player.isJumping) {
-            // Apply jump velocity and gravity
             player.y += player.yVelocity;
             player.yVelocity -= player.gravity;
-            
-            // Land when reaching ground level
             if (player.y <= player.baseHeight) {
                 player.y = player.baseHeight;
                 player.isJumping = false;
             }
         } else if (player.isDucking) {
-            // Lower camera when ducking
             player.y = player.duckHeight;
         } else {
-            // Normal running bob animation
             player.bobAmt += player.bobSpeed * speedMultiplier;
             player.y = player.baseHeight + Math.sin(player.bobAmt) * 0.04;
         }
 
-        // 5. Move camera forward
+        // Camera movement
         camera.position.z -= player.forwardSpeed;
         camera.position.x = player.x;
         camera.position.y = player.y;
-        
-        // Add subtle camera tilt when moving sideways
-        camera.rotation.z = (camera.position.x - player.x) * 0.4;
-        camera.rotation.y = (camera.position.x - player.x) * 0.1;
 
-        // 6. Move clouds for parallax effect
+        // Update skyline (recycle buildings)
+        updateSkyline();
+
+        // Move clouds
         clouds.forEach(c => {
-            c.position.z += 0.05;
-            if(c.position.z > camera.position.z + 50) {
-                c.position.z = camera.position.z - 450;
+            c.position.z += 0.03;
+            if (c.position.z > camera.position.z + 40) {
+                c.position.z = camera.position.z - 350;
             }
         });
 
-        // 7. Collision Detection and Scoring
+        // Collision detection
         obstacles.forEach((obs, index) => {
             const distZ = Math.abs(camera.position.z - obs.z);
             const distX = Math.abs(camera.position.x - obs.x);
 
-            // Check for collision (within 1.2 units of obstacle)
             if (distZ < 1.2) {
                 if (obs.type === 'small_gap' || obs.type === 'full_gap') {
-                    // Gap collision - must be jumping
                     if (!player.isJumping && distX < (obs.w / 2 + 0.3)) {
                         gameOver("WATCH THE GAP!");
                     }
                 } else if (obs.type === 'vent_pipe') {
-                    // Pipe collision - must be ducking (camera below 1.35)
                     if (camera.position.y > 1.35) {
                         gameOver("DUCK UNDER PIPES!");
                     }
                 } else if (distX < (obs.w / 2 + 0.2)) {
-                    // AC unit collision - must dodge
                     if (camera.position.y < (obs.h + 0.4)) {
                         gameOver("DODGE AC UNITS!");
                     }
                 }
             }
 
-            // Score when passing an obstacle
+            // Scoring
             if (obs.z > camera.position.z && !obs.scored) {
                 obs.scored = true;
                 score++;
                 document.getElementById('score').innerText = score;
                 
-                // Track which type of obstacle was beaten
                 if (obs.type === 'small_gap' || obs.type === 'full_gap') {
                     obstacleStats.gaps++;
                 } else if (obs.type === 'vent_pipe') {
@@ -1017,7 +826,7 @@
                 }
             }
 
-            // Remove obstacles that are behind the player and spawn new ones
+            // Recycle obstacles
             if (obs.z > camera.position.z + 20) {
                 scene.remove(obs.mesh);
                 obstacles.splice(index, 1);
@@ -1026,11 +835,9 @@
             }
         });
 
-        // Render the scene
         renderer.render(scene, camera);
     }
 
-    // Start initialization when page loads
     window.onload = init;
 </script>
 
