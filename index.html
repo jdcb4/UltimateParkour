@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Zac's Rooftop Parkour: Day Run</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #87CEEB; font-family: 'Arial Black', sans-serif; user-select: none; }
+        canvas { display: block; }
+        
+        #ui-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            color: #333;
+            z-index: 10;
+        }
+
+        #controls-ui {
+            position: absolute;
+            bottom: 30px;
+            left: 0;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            padding: 0 30px;
+            pointer-events: auto;
+            z-index: 20;
+        }
+        
+        .steering-group { display: flex; flex-direction: column; gap: 10px; justify-content: center; }
+        .action-group { display: flex; flex-direction: column; gap: 15px; align-items: center; }
+
+        .control-btn {
+            background: rgba(0, 0, 0, 0.15);
+            border: 4px solid rgba(0, 0, 0, 0.2);
+            border-radius: 20px;
+            width: 85px;
+            height: 85px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: black;
+            font-size: 30px;
+            backdrop-filter: blur(4px);
+            touch-action: none;
+        }
+
+        .jump-btn { background: rgba(255, 69, 0, 0.4); border-color: #ff4500; font-weight: bold; }
+        .duck-btn { background: rgba(30, 144, 255, 0.4); border-color: #1e90ff; font-weight: bold; }
+
+        .control-btn:active { transform: scale(0.9); background: rgba(0, 0, 0, 0.3); }
+
+        #menu {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(255, 255, 255, 0.95);
+            padding: 30px;
+            border-radius: 30px;
+            text-align: center;
+            border: 6px solid #ff4500;
+            pointer-events: auto;
+            min-width: 320px;
+            z-index: 100;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
+        }
+
+        .start-btn {
+            background: #ff4500;
+            color: white;
+            padding: 15px 40px;
+            border: none;
+            border-radius: 60px;
+            font-size: 24px;
+            cursor: pointer;
+            box-shadow: 0 6px 0 #b33000;
+            margin-top: 15px;
+            text-transform: uppercase;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui-overlay">
+    <div class="flex justify-between items-start">
+        <div class="bg-white/80 p-3 rounded-xl border-l-4 border-[#ff4500] shadow-lg">
+            <h1 class="text-3xl font-bold tracking-tighter italic text-gray-800">DAY DASH</h1>
+            <p class="text-orange-600 font-bold text-xs uppercase">SCORE: <span id="score">0</span> | SPEED: <span id="speedDisplay">1.0</span>x</p>
+        </div>
+        <div class="text-right">
+            <p class="text-xs font-bold text-gray-600 uppercase">BEST: <span id="highScore">0</span></p>
+        </div>
+    </div>
+</div>
+
+<div id="controls-ui" style="display: none;">
+    <div class="steering-group">
+        <div class="flex gap-4">
+            <div class="control-btn" id="btn-left">←</div>
+            <div class="control-btn" id="btn-right">→</div>
+        </div>
+    </div>
+    
+    <div class="action-group">
+        <div class="control-btn jump-btn" id="btn-jump">JUMP</div>
+        <div class="control-btn duck-btn" id="btn-duck">DUCK</div>
+    </div>
+</div>
+
+<div id="menu">
+    <h2 class="text-4xl font-bold mb-1 text-gray-800 italic">ROOFTOP PRO</h2>
+    <p class="text-orange-600 font-bold mb-4 tracking-widest uppercase text-xs">High Visibility Day Mode</p>
+    
+    <div class="bg-gray-100 p-3 rounded-xl mb-4 text-left text-xs space-y-2 text-gray-700">
+        <p class="flex items-center">🏙️ Clear views of the city below!</p>
+        <p class="flex items-center">🚧 Jump <span class="text-orange-600 font-bold ml-1">RED GAPS</span></p>
+        <p class="flex items-center">🔩 Duck <span class="text-blue-600 font-bold ml-1">BLUE PIPES</span></p>
+        <p class="flex items-center">📦 Dodge <span class="text-yellow-600 font-bold ml-1">AC UNITS</span></p>
+    </div>
+
+    <button class="start-btn" onclick="startGame()">START RUN</button>
+</div>
+
+<script>
+    let scene, camera, renderer, clock;
+    let score = 0, highScore = 0, gameActive = false;
+    let obstacles = [];
+    let buildings = [];
+    let clouds = [];
+    const trackWidth = 15;
+    const baseForwardSpeed = 0.28;
+    
+    const player = {
+        x: 0,
+        y: 1.6,
+        baseHeight: 1.6,
+        duckHeight: 0.7,
+        yVelocity: 0,
+        isJumping: false,
+        isDucking: false,
+        jumpForce: 0.18,
+        gravity: 0.0085,
+        moveSpeed: 0.17,
+        forwardSpeed: baseForwardSpeed,
+        bobAmt: 0,
+        bobSpeed: 0.15
+    };
+
+    const keys = { left: false, right: false, space: false, duck: false };
+
+    function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Sky Blue
+        scene.fog = new THREE.Fog(0x87CEEB, 20, 180);
+
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        clock = new THREE.Clock();
+
+        // Daytime Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        scene.add(ambientLight);
+
+        const sunLight = new THREE.DirectionalLight(0xffffff, 0.6);
+        sunLight.position.set(50, 100, 20);
+        scene.add(sunLight);
+
+        // Clouds
+        for(let i=0; i<15; i++) {
+            const cloud = createCloud();
+            cloud.position.set((Math.random()-0.5)*200, 30 + Math.random()*20, -Math.random()*500);
+            scene.add(cloud);
+            clouds.push(cloud);
+        }
+
+        // Listeners
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
+            if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
+            if (e.code === 'Space') keys.space = true;
+            if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.duck = true;
+        });
+        window.addEventListener('keyup', (e) => {
+            if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;
+            if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+            if (e.code === 'Space') keys.space = false;
+            if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.duck = false;
+        });
+
+        const linkBtn = (id, key) => {
+            const el = document.getElementById(id);
+            el.addEventListener('touchstart', (e) => { e.preventDefault(); keys[key] = true; });
+            el.addEventListener('touchend', (e) => { e.preventDefault(); keys[key] = false; });
+            el.addEventListener('mousedown', () => { keys[key] = true; });
+            el.addEventListener('mouseup', () => { keys[key] = false; });
+        };
+        linkBtn('btn-left', 'left');
+        linkBtn('btn-right', 'right');
+        linkBtn('btn-jump', 'space');
+        linkBtn('btn-duck', 'duck');
+
+        window.addEventListener('resize', onWindowResize);
+        resetWorld();
+    }
+
+    function createCloud() {
+        const group = new THREE.Group();
+        const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+        for(let i=0; i<4; i++) {
+            const part = new THREE.Mesh(new THREE.SphereGeometry(3 + Math.random()*3, 8, 8), mat);
+            part.position.x = i * 4;
+            part.position.y = (Math.random()-0.5) * 2;
+            group.add(part);
+        }
+        return group;
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function createBuilding(z, length = 60) {
+        const buildingGroup = new THREE.Group();
+        
+        // Rooftop (Grey Concrete)
+        const roofHeight = 100;
+        const roofGeo = new THREE.BoxGeometry(trackWidth, roofHeight, length);
+        const roofMat = new THREE.MeshPhongMaterial({ color: 0xbdbdbd });
+        const roof = new THREE.Mesh(roofGeo, roofMat);
+        roof.position.y = -roofHeight/2;
+        buildingGroup.add(roof);
+
+        // Windows (Daytime Blue)
+        const windowGeo = new THREE.PlaneGeometry(0.8, 1.2);
+        const windowMat = new THREE.MeshPhongMaterial({ color: 0x87CEEB, shininess: 100 });
+        for(let i=0; i<10; i++) {
+            for(let j=0; j<4; j++) {
+                const win = new THREE.Mesh(windowGeo, windowMat);
+                win.position.set((j-1.5)*3, -5 - i*5, length/2 + 0.1);
+                buildingGroup.add(win);
+                
+                const winBack = win.clone();
+                winBack.position.z = -length/2 - 0.1;
+                winBack.rotation.y = Math.PI;
+                buildingGroup.add(winBack);
+            }
+        }
+
+        // Parapet / Edges
+        const edgeMat = new THREE.MeshPhongMaterial({ color: 0x999999 });
+        const sideRailL = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, length), edgeMat);
+        sideRailL.position.set(-trackWidth/2, 0.5, 0);
+        buildingGroup.add(sideRailL);
+        const sideRailR = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, length), edgeMat);
+        sideRailR.position.set(trackWidth/2, 0.5, 0);
+        buildingGroup.add(sideRailR);
+
+        buildingGroup.position.z = z - length/2;
+        scene.add(buildingGroup);
+        buildings.push({ group: buildingGroup, zStart: z, zEnd: z - length });
+    }
+
+    function createObstacle(z) {
+        const rand = Math.random();
+        let type = 'ac_unit';
+        
+        if (z < -100) {
+            if (rand > 0.8) type = 'full_gap';
+            else if (rand > 0.6) type = 'small_gap';
+            else if (rand > 0.3) type = 'vent_pipe';
+        }
+        
+        let mesh;
+        let col = { type, z, scored: false };
+
+        if (type === 'small_gap' || type === 'full_gap') {
+            const isFull = type === 'full_gap';
+            const width = isFull ? trackWidth : 7;
+            const x = isFull ? 0 : (Math.random() - 0.5) * (trackWidth - 7);
+            
+            // Visual Gap
+            mesh = new THREE.Mesh(
+                new THREE.BoxGeometry(width, 0.2, 5),
+                new THREE.MeshBasicMaterial({ color: 0x333333, transparent: true, opacity: 0.8 })
+            );
+            mesh.position.set(x, 0.01, z);
+            
+            // Bright Safety Stripes
+            const stripe = new THREE.Mesh(new THREE.BoxGeometry(width, 0.15, 0.4), new THREE.MeshBasicMaterial({color: 0xff0000}));
+            stripe.position.z = 2.4;
+            mesh.add(stripe);
+            const stripe2 = stripe.clone();
+            stripe2.position.z = -2.4;
+            mesh.add(stripe2);
+
+            col.w = width; col.h = 0.1; col.x = x;
+
+        } else if (type === 'vent_pipe') {
+            // Bright Blue Industrial Pipe
+            const geo = new THREE.CylinderGeometry(0.7, 0.7, trackWidth, 12);
+            const mat = new THREE.MeshPhongMaterial({ color: 0x1e90ff });
+            mesh = new THREE.Mesh(geo, mat);
+            mesh.rotation.z = Math.PI / 2;
+            mesh.position.set(0, 2.3, z);
+            
+            col.w = trackWidth; col.h = 2.3; col.x = 0; col.minH = 1.4;
+        } else {
+            // Industrial Yellow AC Unit
+            mesh = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 4), new THREE.MeshPhongMaterial({color: 0xffd700}));
+            const pos = [-(trackWidth/4), 0, (trackWidth/4)][Math.floor(Math.random()*3)];
+            mesh.position.set(pos, 1.5, z);
+            
+            // Ventilation Grille
+            const grill = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.1, 3.5), new THREE.MeshBasicMaterial({color: 0x222222}));
+            grill.position.y = 1.51;
+            mesh.add(grill);
+            col.w = 4; col.h = 3; col.x = pos;
+        }
+
+        scene.add(mesh);
+        col.mesh = mesh;
+        obstacles.push(col);
+    }
+
+    function resetWorld() {
+        obstacles.forEach(o => scene.remove(o.mesh));
+        buildings.forEach(b => scene.remove(b.group));
+        obstacles = [];
+        buildings = [];
+        createBuilding(20, 10000); 
+        for(let i=1; i<=10; i++) createObstacle(-60 * i);
+    }
+
+    function startGame() {
+        document.getElementById('menu').style.display = 'none';
+        document.getElementById('controls-ui').style.display = 'flex';
+        gameActive = true;
+        score = 0;
+        player.forwardSpeed = baseForwardSpeed;
+        player.x = 0;
+        player.y = player.baseHeight;
+        player.isJumping = false;
+        player.isDucking = false;
+        camera.position.set(0, player.y, 0);
+        document.getElementById('score').innerText = score;
+        document.getElementById('speedDisplay').innerText = "1.0";
+        resetWorld();
+        animate();
+    }
+
+    function gameOver(reason) {
+        gameActive = false;
+        if (score > highScore) {
+            highScore = score;
+            document.getElementById('highScore').innerText = highScore;
+        }
+        document.getElementById('controls-ui').style.display = 'none';
+        document.getElementById('menu').style.display = 'block';
+        document.getElementById('menu').innerHTML = `
+            <h2 class="text-4xl font-bold mb-2 text-gray-800 italic">GAME OVER</h2>
+            <p class="text-xl mb-4 text-red-600 font-bold uppercase">${reason}</p>
+            <p class="text-2xl mb-6 text-gray-700">SCORE: ${score}</p>
+            <button class="start-btn" onclick="startGame()">TRY AGAIN</button>
+        `;
+    }
+
+    function animate() {
+        if (!gameActive) return;
+        requestAnimationFrame(animate);
+
+        // 1. Movement
+        if (keys.left) player.x -= player.moveSpeed;
+        if (keys.right) player.x += player.moveSpeed;
+        const limit = (trackWidth / 2) - 1.5;
+        if (player.x < -limit) player.x = -limit;
+        if (player.x > limit) player.x = limit;
+
+        // 2. Speed Scaling
+        let speedMultiplier = 1.0;
+        if (score > 20) {
+            const progress = Math.min(1.0, (score - 20) / 30);
+            speedMultiplier = 1.0 + progress; 
+        }
+        player.forwardSpeed = baseForwardSpeed * speedMultiplier;
+        document.getElementById('speedDisplay').innerText = speedMultiplier.toFixed(1);
+
+        // 3. Jump/Duck
+        player.isDucking = keys.duck && !player.isJumping;
+        
+        if (keys.space && !player.isJumping && !player.isDucking) {
+            player.yVelocity = player.jumpForce;
+            player.isJumping = true;
+        }
+
+        if (player.isJumping) {
+            player.y += player.yVelocity;
+            player.yVelocity -= player.gravity;
+            if (player.y <= player.baseHeight) {
+                player.y = player.baseHeight;
+                player.isJumping = false;
+            }
+        } else if (player.isDucking) {
+            player.y = player.duckHeight;
+        } else {
+            player.bobAmt += player.bobSpeed * speedMultiplier;
+            player.y = player.baseHeight + Math.sin(player.bobAmt) * 0.04;
+        }
+
+        camera.position.z -= player.forwardSpeed;
+        camera.position.x = player.x;
+        camera.position.y = player.y;
+        
+        // Dynamic Tilt
+        camera.rotation.z = (camera.position.x - player.x) * 0.4;
+        camera.rotation.y = (camera.position.x - player.x) * 0.1;
+
+        // Move clouds slowly
+        clouds.forEach(c => {
+            c.position.z += 0.05;
+            if(c.position.z > camera.position.z + 50) c.position.z = camera.position.z - 450;
+        });
+
+        // 4. Collision
+        obstacles.forEach((obs, index) => {
+            const distZ = Math.abs(camera.position.z - obs.z);
+            const distX = Math.abs(camera.position.x - obs.x);
+
+            if (distZ < 1.2) {
+                if (obs.type === 'small_gap' || obs.type === 'full_gap') {
+                    if (!player.isJumping && distX < (obs.w / 2 + 0.3)) {
+                        gameOver("WATCH THE GAP!");
+                    }
+                } else if (obs.type === 'vent_pipe') {
+                    if (camera.position.y > 1.35) {
+                        gameOver("DUCK UNDER PIPES!");
+                    }
+                } else if (distX < (obs.w / 2 + 0.2)) {
+                    if (camera.position.y < (obs.h + 0.4)) {
+                        gameOver("DODGE AC UNITS!");
+                    }
+                }
+            }
+
+            if (obs.z > camera.position.z && !obs.scored) {
+                obs.scored = true;
+                score++;
+                document.getElementById('score').innerText = score;
+            }
+
+            if (obs.z > camera.position.z + 20) {
+                scene.remove(obs.mesh);
+                obstacles.splice(index, 1);
+                const lastZ = obstacles.length > 0 ? obstacles[obstacles.length-1].z : camera.position.z;
+                createObstacle(lastZ - (55 + Math.random() * 25));
+            }
+        });
+
+        renderer.render(scene, camera);
+    }
+
+    window.onload = init;
+</script>
+
+</body>
+</html>
+
