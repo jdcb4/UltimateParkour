@@ -53,9 +53,47 @@
         }
 
         .jump-btn { background: rgba(255, 69, 0, 0.4); border-color: #ff4500; font-weight: bold; }
-        .duck-btn { background: rgba(30, 144, 255, 0.4); border-color: #1e90ff; font-weight: bold; }
+        .duck-btn { background: rgba(30, 144, 255, 0.4); border-color: #1e90ff; font-weight: bold; position: relative; }
 
         .control-btn:active { transform: scale(0.9); background: rgba(0, 0, 0, 0.3); }
+
+        /* Duck meter styling */
+        #duck-meter-container {
+            position: absolute;
+            bottom: 100px;
+            right: 30px;
+            width: 85px;
+            height: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 5px;
+            overflow: hidden;
+            z-index: 25;
+            display: none;
+        }
+
+        #duck-meter {
+            height: 100%;
+            width: 100%;
+            background: linear-gradient(90deg, #1e90ff, #00bfff);
+            border-radius: 5px;
+            transition: width 0.05s linear;
+        }
+
+        #duck-meter.depleted {
+            background: linear-gradient(90deg, #ff4444, #cc0000);
+        }
+
+        .duck-btn .cooldown-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 0%;
+            background: rgba(255, 0, 0, 0.4);
+            border-radius: 0 0 16px 16px;
+            transition: height 0.05s linear;
+            pointer-events: none;
+        }
 
         #menu {
             position: absolute;
@@ -68,6 +106,7 @@
             border: 6px solid #ff4500;
             pointer-events: auto;
             min-width: 320px;
+            max-width: 400px;
             z-index: 100;
             box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
         }
@@ -83,6 +122,36 @@
             box-shadow: 0 6px 0 #b33000;
             margin-top: 15px;
             text-transform: uppercase;
+            font-weight: bold;
+        }
+
+        .score-summary {
+            background: #f3f4f6;
+            border-radius: 15px;
+            padding: 15px;
+            margin: 15px 0;
+            text-align: left;
+        }
+
+        .score-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .score-item:last-child { border-bottom: none; }
+
+        .score-item .label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: bold;
+        }
+
+        .score-item .count {
+            font-size: 1.2em;
             font-weight: bold;
         }
     </style>
@@ -101,6 +170,10 @@
     </div>
 </div>
 
+<div id="duck-meter-container">
+    <div id="duck-meter"></div>
+</div>
+
 <div id="controls-ui" style="display: none;">
     <div class="steering-group">
         <div class="flex gap-4">
@@ -111,7 +184,10 @@
     
     <div class="action-group">
         <div class="control-btn jump-btn" id="btn-jump">JUMP</div>
-        <div class="control-btn duck-btn" id="btn-duck">DUCK</div>
+        <div class="control-btn duck-btn" id="btn-duck">
+            DUCK
+            <div class="cooldown-overlay" id="duck-cooldown"></div>
+        </div>
     </div>
 </div>
 
@@ -124,12 +200,14 @@
         <p class="flex items-center">🚧 Jump <span class="text-orange-600 font-bold ml-1">RED GAPS</span></p>
         <p class="flex items-center">🔩 Duck <span class="text-blue-600 font-bold ml-1">BLUE PIPES</span></p>
         <p class="flex items-center">📦 Dodge <span class="text-yellow-600 font-bold ml-1">AC UNITS</span></p>
+        <p class="flex items-center">⏱️ Duck has a time limit - watch the meter!</p>
     </div>
 
     <button class="start-btn" onclick="startGame()">START RUN</button>
 </div>
 
 <script>
+    // ===== GAME VARIABLES =====
     let scene, camera, renderer, clock;
     let score = 0, highScore = 0, gameActive = false;
     let obstacles = [];
@@ -138,6 +216,23 @@
     const trackWidth = 15;
     const baseForwardSpeed = 0.28;
     
+    // ===== OPTIMIZED SKYLINE =====
+    // Pre-generated building textures (reused for performance)
+    let buildingTextures = [];
+    // Pool of skyline building sprites (recycled as player moves)
+    let skylineSprites = [];
+    const SKYLINE_POOL_SIZE = 24; // Only 24 sprites total, recycled
+    const SKYLINE_SPACING = 80;   // Distance between buildings
+    
+    // Track obstacle stats for end-of-game summary
+    let obstacleStats = { gaps: 0, pipes: 0, acUnits: 0 };
+
+    // Duck time limit (seconds)
+    const MAX_DUCK_TIME = 1.5;
+    let currentDuckTime = MAX_DUCK_TIME;
+    let isDuckDepleted = false;
+    
+    // Player state
     const player = {
         x: 0,
         y: 1.6,
@@ -156,37 +251,44 @@
 
     const keys = { left: false, right: false, space: false, duck: false };
 
+    // ===== INITIALIZATION =====
     function init() {
         scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x87CEEB); // Sky Blue
-        scene.fog = new THREE.Fog(0x87CEEB, 20, 180);
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 40, 200);
 
-        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
         
-        renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer = new THREE.WebGLRenderer({ antialias: false }); // Disable antialiasing for performance
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap pixel ratio
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
 
         clock = new THREE.Clock();
 
-        // Daytime Lighting
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        // Simplified lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
         scene.add(ambientLight);
 
-        const sunLight = new THREE.DirectionalLight(0xffffff, 0.6);
+        const sunLight = new THREE.DirectionalLight(0xffffff, 0.4);
         sunLight.position.set(50, 100, 20);
         scene.add(sunLight);
 
-        // Clouds
-        for(let i=0; i<15; i++) {
+        // Create fewer clouds (8 instead of 15)
+        for(let i = 0; i < 8; i++) {
             const cloud = createCloud();
-            cloud.position.set((Math.random()-0.5)*200, 30 + Math.random()*20, -Math.random()*500);
+            cloud.position.set((Math.random() - 0.5) * 150, 25 + Math.random() * 15, -Math.random() * 400);
             scene.add(cloud);
             clouds.push(cloud);
         }
 
-        // Listeners
+        // Pre-generate building textures (done once at startup)
+        generateBuildingTextures();
+        
+        // Create the skyline sprite pool
+        createSkylinePool();
+
+        // Keyboard controls
         window.addEventListener('keydown', (e) => {
             if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
             if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
@@ -200,6 +302,7 @@
             if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.duck = false;
         });
 
+        // Touch/mouse button controls
         const linkBtn = (id, key) => {
             const el = document.getElementById(id);
             el.addEventListener('touchstart', (e) => { e.preventDefault(); keys[key] = true; });
@@ -216,13 +319,144 @@
         resetWorld();
     }
 
+    // ===== BUILDING TEXTURE GENERATION =====
+    // Creates building textures on 2D canvas (much faster than 3D geometry)
+    function generateBuildingTextures() {
+        const colors = ['#4a5568', '#718096', '#2d3748', '#1a365d', '#2c5282', '#553c9a'];
+        const windowColors = ['#87CEEB', '#ffeaa7', '#74b9ff', '#dfe6e9'];
+        
+        // Generate 6 different building textures
+        for (let i = 0; i < 6; i++) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;  // Small texture size for performance
+            canvas.height = 128;
+            const ctx = canvas.getContext('2d');
+            
+            // Building body color
+            ctx.fillStyle = colors[i % colors.length];
+            ctx.fillRect(0, 0, 64, 128);
+            
+            // Add windows (drawn as rectangles on the texture)
+            const winColor = windowColors[Math.floor(Math.random() * windowColors.length)];
+            ctx.fillStyle = winColor;
+            
+            const windowWidth = 6;
+            const windowHeight = 8;
+            const cols = 4;
+            const rows = 10;
+            const spacingX = 14;
+            const spacingY = 12;
+            const offsetX = 5;
+            const offsetY = 4;
+            
+            for (let row = 0; row < rows; row++) {
+                for (let col = 0; col < cols; col++) {
+                    // Randomly skip some windows for variety
+                    if (Math.random() > 0.2) {
+                        ctx.fillRect(
+                            offsetX + col * spacingX,
+                            offsetY + row * spacingY,
+                            windowWidth,
+                            windowHeight
+                        );
+                    }
+                }
+            }
+            
+            // Add rooftop detail (antenna or water tower silhouette)
+            ctx.fillStyle = '#333333';
+            if (Math.random() > 0.5) {
+                // Antenna
+                ctx.fillRect(30, 0, 2, 8);
+                ctx.fillStyle = '#ff0000';
+                ctx.fillRect(29, 0, 4, 3);
+            }
+            
+            // Create Three.js texture from canvas
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.magFilter = THREE.NearestFilter; // Pixelated look, faster
+            buildingTextures.push(texture);
+        }
+    }
+
+    // ===== SKYLINE POOL =====
+    // Creates a pool of billboard sprites for the skyline (recycled for performance)
+    function createSkylinePool() {
+        // Clear existing sprites
+        skylineSprites.forEach(s => scene.remove(s.mesh));
+        skylineSprites = [];
+        
+        // Create sprites for left and right sides
+        for (let i = 0; i < SKYLINE_POOL_SIZE; i++) {
+            const side = i < SKYLINE_POOL_SIZE / 2 ? -1 : 1; // Left or right
+            const texture = buildingTextures[i % buildingTextures.length];
+            
+            // Random building height
+            const height = 40 + Math.random() * 60;
+            const width = height * 0.5;
+            
+            // Use SpriteMaterial for always-facing-camera billboards (very fast)
+            const material = new THREE.SpriteMaterial({ 
+                map: texture,
+                fog: true
+            });
+            const sprite = new THREE.Sprite(material);
+            sprite.scale.set(width, height, 1);
+            
+            // Position: offset to the side, below ground level, spread along z
+            const xOffset = 30 + Math.random() * 40;
+            sprite.position.set(
+                side * xOffset,
+                -height / 2 + 20, // Partially below ground
+                -i * SKYLINE_SPACING / 2
+            );
+            
+            scene.add(sprite);
+            skylineSprites.push({
+                mesh: sprite,
+                side: side,
+                height: height,
+                xOffset: xOffset
+            });
+        }
+    }
+
+    // Updates skyline positions (recycles sprites that go behind camera)
+    function updateSkyline() {
+        const recycleZ = camera.position.z + 50; // Behind camera threshold
+        const spawnZ = camera.position.z - 300;  // Far ahead spawn point
+        
+        skylineSprites.forEach(sprite => {
+            // If building is behind the player, recycle it to the front
+            if (sprite.mesh.position.z > recycleZ) {
+                sprite.mesh.position.z = spawnZ - Math.random() * 100;
+                
+                // Randomize appearance when recycled
+                sprite.xOffset = 30 + Math.random() * 40;
+                sprite.mesh.position.x = sprite.side * sprite.xOffset;
+                
+                // Random new height
+                const newHeight = 40 + Math.random() * 60;
+                sprite.mesh.scale.set(newHeight * 0.5, newHeight, 1);
+                sprite.mesh.position.y = -newHeight / 2 + 20;
+                
+                // Random texture
+                sprite.mesh.material.map = buildingTextures[Math.floor(Math.random() * buildingTextures.length)];
+            }
+        });
+    }
+
+    // ===== SIMPLE CLOUD CREATION =====
     function createCloud() {
         const group = new THREE.Group();
-        const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-        for(let i=0; i<4; i++) {
-            const part = new THREE.Mesh(new THREE.SphereGeometry(3 + Math.random()*3, 8, 8), mat);
-            part.position.x = i * 4;
-            part.position.y = (Math.random()-0.5) * 2;
+        // Use fewer, larger spheres (3 instead of 4)
+        const mat = new THREE.MeshBasicMaterial({ color: 0xffffff }); // BasicMaterial is faster
+        for(let i = 0; i < 3; i++) {
+            const part = new THREE.Mesh(
+                new THREE.SphereGeometry(4 + Math.random() * 2, 6, 6), // Lower poly count
+                mat
+            );
+            part.position.x = i * 5;
             group.add(part);
         }
         return group;
@@ -234,47 +468,33 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
+    // ===== MAIN TRACK BUILDING =====
     function createBuilding(z, length = 60) {
         const buildingGroup = new THREE.Group();
         
-        // Rooftop (Grey Concrete)
+        // Main rooftop (single mesh)
         const roofHeight = 100;
         const roofGeo = new THREE.BoxGeometry(trackWidth, roofHeight, length);
         const roofMat = new THREE.MeshPhongMaterial({ color: 0xbdbdbd });
         const roof = new THREE.Mesh(roofGeo, roofMat);
-        roof.position.y = -roofHeight/2;
+        roof.position.y = -roofHeight / 2;
         buildingGroup.add(roof);
 
-        // Windows (Daytime Blue)
-        const windowGeo = new THREE.PlaneGeometry(0.8, 1.2);
-        const windowMat = new THREE.MeshPhongMaterial({ color: 0x87CEEB, shininess: 100 });
-        for(let i=0; i<10; i++) {
-            for(let j=0; j<4; j++) {
-                const win = new THREE.Mesh(windowGeo, windowMat);
-                win.position.set((j-1.5)*3, -5 - i*5, length/2 + 0.1);
-                buildingGroup.add(win);
-                
-                const winBack = win.clone();
-                winBack.position.z = -length/2 - 0.1;
-                winBack.rotation.y = Math.PI;
-                buildingGroup.add(winBack);
-            }
-        }
-
-        // Parapet / Edges
+        // Simplified edge rails (2 meshes only)
         const edgeMat = new THREE.MeshPhongMaterial({ color: 0x999999 });
         const sideRailL = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, length), edgeMat);
-        sideRailL.position.set(-trackWidth/2, 0.5, 0);
+        sideRailL.position.set(-trackWidth / 2, 0.5, 0);
         buildingGroup.add(sideRailL);
         const sideRailR = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, length), edgeMat);
-        sideRailR.position.set(trackWidth/2, 0.5, 0);
+        sideRailR.position.set(trackWidth / 2, 0.5, 0);
         buildingGroup.add(sideRailR);
 
-        buildingGroup.position.z = z - length/2;
+        buildingGroup.position.z = z - length / 2;
         scene.add(buildingGroup);
         buildings.push({ group: buildingGroup, zStart: z, zEnd: z - length });
     }
 
+    // ===== OBSTACLE CREATION (simplified geometry) =====
     function createObstacle(z) {
         const rand = Math.random();
         let type = 'ac_unit';
@@ -289,46 +509,78 @@
         let col = { type, z, scored: false };
 
         if (type === 'small_gap' || type === 'full_gap') {
+            // Gap - simplified (just a dark box with red stripes)
             const isFull = type === 'full_gap';
             const width = isFull ? trackWidth : 7;
             const x = isFull ? 0 : (Math.random() - 0.5) * (trackWidth - 7);
             
-            // Visual Gap
-            mesh = new THREE.Mesh(
-                new THREE.BoxGeometry(width, 0.2, 5),
-                new THREE.MeshBasicMaterial({ color: 0x333333, transparent: true, opacity: 0.8 })
-            );
-            mesh.position.set(x, 0.01, z);
+            const gapGroup = new THREE.Group();
             
-            // Bright Safety Stripes
-            const stripe = new THREE.Mesh(new THREE.BoxGeometry(width, 0.15, 0.4), new THREE.MeshBasicMaterial({color: 0xff0000}));
-            stripe.position.z = 2.4;
-            mesh.add(stripe);
-            const stripe2 = stripe.clone();
-            stripe2.position.z = -2.4;
-            mesh.add(stripe2);
-
+            // Dark void
+            const voidMesh = new THREE.Mesh(
+                new THREE.BoxGeometry(width, 0.2, 5),
+                new THREE.MeshBasicMaterial({ color: 0x1a1a2e })
+            );
+            gapGroup.add(voidMesh);
+            
+            // Red warning stripes (2 simple boxes)
+            const stripeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+            const stripe1 = new THREE.Mesh(new THREE.BoxGeometry(width, 0.15, 0.4), stripeMat);
+            stripe1.position.set(0, 0.1, 2.4);
+            gapGroup.add(stripe1);
+            const stripe2 = new THREE.Mesh(new THREE.BoxGeometry(width, 0.15, 0.4), stripeMat);
+            stripe2.position.set(0, 0.1, -2.4);
+            gapGroup.add(stripe2);
+            
+            gapGroup.position.set(x, 0.01, z);
+            mesh = gapGroup;
             col.w = width; col.h = 0.1; col.x = x;
 
         } else if (type === 'vent_pipe') {
-            // Bright Blue Industrial Pipe
-            const geo = new THREE.CylinderGeometry(0.7, 0.7, trackWidth, 12);
-            const mat = new THREE.MeshPhongMaterial({ color: 0x1e90ff });
-            mesh = new THREE.Mesh(geo, mat);
-            mesh.rotation.z = Math.PI / 2;
-            mesh.position.set(0, 2.3, z);
+            // Blue pipe - simplified (single cylinder + 2 brackets)
+            const pipeGroup = new THREE.Group();
             
+            const mainPipe = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.7, 0.7, trackWidth, 8), // Lower poly
+                new THREE.MeshPhongMaterial({ color: 0x1e90ff })
+            );
+            mainPipe.rotation.z = Math.PI / 2;
+            pipeGroup.add(mainPipe);
+            
+            // Simple brackets
+            const bracketMat = new THREE.MeshBasicMaterial({ color: 0x444444 });
+            const bracket1 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 2.3, 0.5), bracketMat);
+            bracket1.position.set(-trackWidth / 2 + 1, -1.15, 0);
+            pipeGroup.add(bracket1);
+            const bracket2 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 2.3, 0.5), bracketMat);
+            bracket2.position.set(trackWidth / 2 - 1, -1.15, 0);
+            pipeGroup.add(bracket2);
+            
+            pipeGroup.position.set(0, 2.3, z);
+            mesh = pipeGroup;
             col.w = trackWidth; col.h = 2.3; col.x = 0; col.minH = 1.4;
-        } else {
-            // Industrial Yellow AC Unit
-            mesh = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 4), new THREE.MeshPhongMaterial({color: 0xffd700}));
-            const pos = [-(trackWidth/4), 0, (trackWidth/4)][Math.floor(Math.random()*3)];
-            mesh.position.set(pos, 1.5, z);
             
-            // Ventilation Grille
-            const grill = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.1, 3.5), new THREE.MeshBasicMaterial({color: 0x222222}));
+        } else {
+            // AC Unit - simplified (just main box + grille)
+            const acGroup = new THREE.Group();
+            
+            const body = new THREE.Mesh(
+                new THREE.BoxGeometry(4, 3, 4),
+                new THREE.MeshPhongMaterial({ color: 0xffd700 })
+            );
+            acGroup.add(body);
+            
+            // Simple top grille
+            const grill = new THREE.Mesh(
+                new THREE.BoxGeometry(3.5, 0.1, 3.5),
+                new THREE.MeshBasicMaterial({ color: 0x222222 })
+            );
             grill.position.y = 1.51;
-            mesh.add(grill);
+            acGroup.add(grill);
+            
+            const pos = [-(trackWidth / 4), 0, (trackWidth / 4)][Math.floor(Math.random() * 3)];
+            acGroup.position.set(pos, 1.5, z);
+            mesh = acGroup;
             col.w = 4; col.h = 3; col.x = pos;
         }
 
@@ -342,66 +594,167 @@
         buildings.forEach(b => scene.remove(b.group));
         obstacles = [];
         buildings = [];
-        createBuilding(20, 10000); 
-        for(let i=1; i<=10; i++) createObstacle(-60 * i);
+        createBuilding(20, 10000);
+        for(let i = 1; i <= 10; i++) {
+            createObstacle(-60 * i);
+        }
+        
+        // Reset skyline positions
+        skylineSprites.forEach((sprite, i) => {
+            sprite.mesh.position.z = -i * SKYLINE_SPACING / 2;
+        });
     }
 
+    // ===== GAME START =====
     function startGame() {
         document.getElementById('menu').style.display = 'none';
         document.getElementById('controls-ui').style.display = 'flex';
+        document.getElementById('duck-meter-container').style.display = 'block';
+        
         gameActive = true;
         score = 0;
+        obstacleStats = { gaps: 0, pipes: 0, acUnits: 0 };
+        
+        currentDuckTime = MAX_DUCK_TIME;
+        isDuckDepleted = false;
+        updateDuckMeter();
+        
         player.forwardSpeed = baseForwardSpeed;
         player.x = 0;
         player.y = player.baseHeight;
         player.isJumping = false;
         player.isDucking = false;
         camera.position.set(0, player.y, 0);
+        
         document.getElementById('score').innerText = score;
         document.getElementById('speedDisplay').innerText = "1.0";
+        
         resetWorld();
         animate();
     }
 
+    // ===== GAME OVER =====
     function gameOver(reason) {
         gameActive = false;
+        
         if (score > highScore) {
             highScore = score;
             document.getElementById('highScore').innerText = highScore;
         }
+        
         document.getElementById('controls-ui').style.display = 'none';
+        document.getElementById('duck-meter-container').style.display = 'none';
         document.getElementById('menu').style.display = 'block';
         document.getElementById('menu').innerHTML = `
             <h2 class="text-4xl font-bold mb-2 text-gray-800 italic">GAME OVER</h2>
             <p class="text-xl mb-4 text-red-600 font-bold uppercase">${reason}</p>
-            <p class="text-2xl mb-6 text-gray-700">SCORE: ${score}</p>
+            
+            <div class="score-summary">
+                <p class="text-lg font-bold text-gray-800 mb-3 text-center">📊 RUN SUMMARY</p>
+                
+                <div class="score-item">
+                    <span class="label">
+                        <span style="color: #ff4500;">🚧</span>
+                        <span style="color: #ff4500;">Gaps Jumped</span>
+                    </span>
+                    <span class="count" style="color: #ff4500;">${obstacleStats.gaps}</span>
+                </div>
+                
+                <div class="score-item">
+                    <span class="label">
+                        <span style="color: #1e90ff;">🔩</span>
+                        <span style="color: #1e90ff;">Pipes Ducked</span>
+                    </span>
+                    <span class="count" style="color: #1e90ff;">${obstacleStats.pipes}</span>
+                </div>
+                
+                <div class="score-item">
+                    <span class="label">
+                        <span style="color: #ffd700;">📦</span>
+                        <span style="color: #daa520;">AC Units Dodged</span>
+                    </span>
+                    <span class="count" style="color: #daa520;">${obstacleStats.acUnits}</span>
+                </div>
+                
+                <div class="score-item" style="border-top: 2px solid #333; margin-top: 10px; padding-top: 10px;">
+                    <span class="label">
+                        <span>🏆</span>
+                        <span class="text-gray-800">TOTAL SCORE</span>
+                    </span>
+                    <span class="count text-gray-800">${score}</span>
+                </div>
+            </div>
+            
             <button class="start-btn" onclick="startGame()">TRY AGAIN</button>
         `;
     }
 
+    // ===== DUCK METER =====
+    function updateDuckMeter() {
+        const meter = document.getElementById('duck-meter');
+        const percentage = (currentDuckTime / MAX_DUCK_TIME) * 100;
+        meter.style.width = percentage + '%';
+        
+        if (isDuckDepleted) {
+            meter.classList.add('depleted');
+        } else {
+            meter.classList.remove('depleted');
+        }
+        
+        const cooldown = document.getElementById('duck-cooldown');
+        if (isDuckDepleted) {
+            cooldown.style.height = '100%';
+        } else {
+            cooldown.style.height = (100 - percentage) + '%';
+        }
+    }
+
+    // ===== MAIN GAME LOOP =====
     function animate() {
         if (!gameActive) return;
         requestAnimationFrame(animate);
 
-        // 1. Movement
+        const delta = clock.getDelta();
+
+        // Movement
         if (keys.left) player.x -= player.moveSpeed;
         if (keys.right) player.x += player.moveSpeed;
         const limit = (trackWidth / 2) - 1.5;
-        if (player.x < -limit) player.x = -limit;
-        if (player.x > limit) player.x = limit;
+        player.x = Math.max(-limit, Math.min(limit, player.x));
 
-        // 2. Speed Scaling
+        // Speed scaling
         let speedMultiplier = 1.0;
         if (score > 20) {
-            const progress = Math.min(1.0, (score - 20) / 30);
-            speedMultiplier = 1.0 + progress; 
+            speedMultiplier = 1.0 + Math.min(1.0, (score - 20) / 30);
         }
         player.forwardSpeed = baseForwardSpeed * speedMultiplier;
         document.getElementById('speedDisplay').innerText = speedMultiplier.toFixed(1);
 
-        // 3. Jump/Duck
-        player.isDucking = keys.duck && !player.isJumping;
+        // Duck management
+        const wantsToDuck = keys.duck && !player.isJumping;
         
+        if (wantsToDuck && !isDuckDepleted && currentDuckTime > 0) {
+            player.isDucking = true;
+            currentDuckTime -= delta;
+            if (currentDuckTime <= 0) {
+                currentDuckTime = 0;
+                isDuckDepleted = true;
+                player.isDucking = false;
+            }
+        } else {
+            player.isDucking = false;
+            if (currentDuckTime < MAX_DUCK_TIME) {
+                currentDuckTime += delta * 2;
+                if (currentDuckTime >= MAX_DUCK_TIME) {
+                    currentDuckTime = MAX_DUCK_TIME;
+                    isDuckDepleted = false;
+                }
+            }
+            if (!keys.duck) isDuckDepleted = false;
+        }
+        updateDuckMeter();
+
+        // Jump
         if (keys.space && !player.isJumping && !player.isDucking) {
             player.yVelocity = player.jumpForce;
             player.isJumping = true;
@@ -421,21 +774,23 @@
             player.y = player.baseHeight + Math.sin(player.bobAmt) * 0.04;
         }
 
+        // Camera movement
         camera.position.z -= player.forwardSpeed;
         camera.position.x = player.x;
         camera.position.y = player.y;
-        
-        // Dynamic Tilt
-        camera.rotation.z = (camera.position.x - player.x) * 0.4;
-        camera.rotation.y = (camera.position.x - player.x) * 0.1;
 
-        // Move clouds slowly
+        // Update skyline (recycle buildings)
+        updateSkyline();
+
+        // Move clouds
         clouds.forEach(c => {
-            c.position.z += 0.05;
-            if(c.position.z > camera.position.z + 50) c.position.z = camera.position.z - 450;
+            c.position.z += 0.03;
+            if (c.position.z > camera.position.z + 40) {
+                c.position.z = camera.position.z - 350;
+            }
         });
 
-        // 4. Collision
+        // Collision detection
         obstacles.forEach((obs, index) => {
             const distZ = Math.abs(camera.position.z - obs.z);
             const distX = Math.abs(camera.position.x - obs.x);
@@ -456,16 +811,26 @@
                 }
             }
 
+            // Scoring
             if (obs.z > camera.position.z && !obs.scored) {
                 obs.scored = true;
                 score++;
                 document.getElementById('score').innerText = score;
+                
+                if (obs.type === 'small_gap' || obs.type === 'full_gap') {
+                    obstacleStats.gaps++;
+                } else if (obs.type === 'vent_pipe') {
+                    obstacleStats.pipes++;
+                } else {
+                    obstacleStats.acUnits++;
+                }
             }
 
+            // Recycle obstacles
             if (obs.z > camera.position.z + 20) {
                 scene.remove(obs.mesh);
                 obstacles.splice(index, 1);
-                const lastZ = obstacles.length > 0 ? obstacles[obstacles.length-1].z : camera.position.z;
+                const lastZ = obstacles.length > 0 ? obstacles[obstacles.length - 1].z : camera.position.z;
                 createObstacle(lastZ - (55 + Math.random() * 25));
             }
         });
@@ -478,4 +843,3 @@
 
 </body>
 </html>
-
